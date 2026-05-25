@@ -1,0 +1,22 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "openevent-view"
+version = "0.1.0"
+description = "Web viewer for OpenEvent history messages"
+requires-python = ">=3.10"
+dependencies = [
+    "openevent-sdk>=0.3.0",
+    "PyYAML",
+]
+
+[project.optional-dependencies]
+test = []
+
+[project.scripts]
+openevent-view = "openevent.view.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/openevent"]
