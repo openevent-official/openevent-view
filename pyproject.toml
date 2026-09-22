@@ -8,13 +8,13 @@ version = "0.1.0"
 description = "Web viewer for OpenEvent history messages"
 requires-python = ">=3.10"
 dependencies = [
-    "openevent-sdk>=0.6.0",
+    "openevent-sdk>=0.8.0",
     "PyYAML",
     "orjson>=3.10",
 ]
 
 [project.optional-dependencies]
-test = []
+test = ["packaging", "tomli; python_version < '3.11'"]
 
 [project.scripts]
 openevent-view = "openevent.view.cli:main"

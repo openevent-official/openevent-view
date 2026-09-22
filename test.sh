@@ -4,61 +4,55 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILD_DIR="$ROOT_DIR/build"
 PYTHON_BIN="${PYTHON:-python3}"
-PYCACHE_DIR="$BUILD_DIR/pycache"
 TMP_WORK_DIR="$BUILD_DIR/tmp"
 
-rm -rf "$PYCACHE_DIR" "$TMP_WORK_DIR"
-mkdir -p "$PYCACHE_DIR" "$TMP_WORK_DIR"
+mkdir -p "$TMP_WORK_DIR"
 
-export PYTHONPYCACHEPREFIX="$PYCACHE_DIR"
+export PYTHONDONTWRITEBYTECODE=1
+export PIP_NO_COMPILE=1
 export PIP_NO_CACHE_DIR=1
 export PIP_DISABLE_PIP_VERSION_CHECK=1
 export TMPDIR="$TMP_WORK_DIR"
 
 cd "$ROOT_DIR"
 
-"$PYTHON_BIN" - <<'PY'
-import importlib.util
+"$PYTHON_BIN" -B - <<'PY'
 import importlib.metadata
 import sys
 
-requirements = [
-    ("yaml", "PyYAML"),
-    ("grpc", "grpcio"),
-    ("openevent.sdk", "openevent-sdk>=0.6.0"),
-    ("orjson", "orjson>=3.10"),
-]
-missing = [package for module, package in requirements if importlib.util.find_spec(module) is None]
-if missing:
-    print("missing Python dependencies in the current environment:", ", ".join(missing), file=sys.stderr)
-    print(
-        "install them from the normal package source before running tests",
-        file=sys.stderr,
-    )
+try:
+    from packaging.requirements import Requirement
+    if sys.version_info >= (3, 11):
+        import tomllib
+    else:
+        import tomli as tomllib
+except ImportError as error:
+    print(f"missing test dependency: {error.name}; install the declared test extras", file=sys.stderr)
     sys.exit(2)
 
-try:
-    version = importlib.metadata.version("openevent-sdk")
-except importlib.metadata.PackageNotFoundError:
-    print("missing Python dependency: openevent-sdk>=0.6.0", file=sys.stderr)
-    sys.exit(2)
-parts = tuple(int(part) for part in version.split(".")[:3] if part.isdigit())
-if parts < (0, 6, 0):
-    print(f"openevent-sdk>=0.6.0 is required, found {version}", file=sys.stderr)
-    sys.exit(2)
-try:
-    orjson_version = importlib.metadata.version("orjson")
-except importlib.metadata.PackageNotFoundError:
-    print("missing Python dependency: orjson>=3.10", file=sys.stderr)
-    sys.exit(2)
-orjson_parts = tuple(int(part) for part in orjson_version.split(".")[:3] if part.isdigit())
-if orjson_parts < (3, 10, 0):
-    print(f"orjson>=3.10 is required, found {orjson_version}", file=sys.stderr)
+with open("pyproject.toml", "rb") as stream:
+    project = tomllib.load(stream)["project"]
+failures = []
+for declaration in project["dependencies"] + project["optional-dependencies"]["test"]:
+    requirement = Requirement(declaration)
+    if requirement.marker and not requirement.marker.evaluate():
+        continue
+    try:
+        version = importlib.metadata.version(requirement.name)
+    except importlib.metadata.PackageNotFoundError:
+        failures.append(f"{requirement} is not installed")
+    else:
+        if version not in requirement.specifier:
+            failures.append(f"{requirement} is required, found {version}")
+if failures:
+    print("Python dependencies in the current environment do not meet the package declarations:", file=sys.stderr)
+    print("\n".join(f"  {failure}" for failure in failures), file=sys.stderr)
+    print("Install the declared dependencies before running tests; tests do not install the SDK.", file=sys.stderr)
     sys.exit(2)
 PY
 
 export PYTHONPATH="$ROOT_DIR/src${PYTHONPATH:+:$PYTHONPATH}"
 
-"$PYTHON_BIN" -m unittest discover -s tests -v "$@"
+"$PYTHON_BIN" -B -m unittest discover -s tests -v "$@"
 
 printf 'test artifacts: %s\n' "$BUILD_DIR"

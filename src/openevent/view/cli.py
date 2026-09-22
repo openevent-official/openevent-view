@@ -20,9 +20,10 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         from openevent.sdk import OpenEventClient
+        from .upstream import HistoryClient
     except ImportError as exc:
         raise SystemExit(
-            "failed to import openevent-sdk; install openevent-sdk>=0.6.0 "
+            "failed to import openevent-sdk; install openevent-sdk>=0.8.0 "
             "before starting openevent-view"
         ) from exc
 
@@ -32,23 +33,27 @@ def main(argv: list[str] | None = None) -> int:
 
     client = OpenEventClient(
         config.openevent.target,
-        timeout=config.openevent.rpc_timeout_seconds,
+        timeout_ms=config.openevent.rpc_timeout_seconds * 1000,
     )
     history_service = HistoryService(
-        client,
+        HistoryClient(client),
         config.history,
         channel_cache_size=config.openevent.channel_cache_size,
         channel_lookup_workers=config.openevent.channel_lookup_workers,
+        query_timeout_seconds=config.server.query_timeout_seconds,
+        rpc_timeout_seconds=config.openevent.rpc_timeout_seconds,
     )
-    server = create_server(config, history_service)
-    address = f"http://{config.server.host}:{config.server.port}/"
-    logging.getLogger(__name__).info("openevent-view listening on %s", address)
+    server = None
     try:
+        server = create_server(config, history_service)
+        address = f"http://{config.server.host}:{config.server.port}/"
+        logging.getLogger(__name__).info("openevent-view listening on %s", address)
         server.serve_forever()
     except KeyboardInterrupt:
         logging.getLogger(__name__).info("shutdown requested")
     finally:
-        server.server_close()
+        if server is not None:
+            server.server_close()
         history_service.close()
         client.close()
     return 0

@@ -17,6 +17,7 @@ class ServerConfig:
     host: str = "127.0.0.1"
     port: int = 8080
     request_timeout_seconds: float = 10.0
+    query_timeout_seconds: float = 30.0
     max_request_body_bytes: int = 65536
 
 
@@ -103,6 +104,10 @@ def parse_config(raw: Any) -> ViewConfig:
                     "request_timeout_seconds", ServerConfig.request_timeout_seconds
                 ),
                 "server.request_timeout_seconds",
+            ),
+            query_timeout_seconds=_positive_number(
+                server_data.get("query_timeout_seconds", ServerConfig.query_timeout_seconds),
+                "server.query_timeout_seconds",
             ),
             max_request_body_bytes=_positive_int(
                 server_data.get(

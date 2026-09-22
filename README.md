@@ -2,132 +2,105 @@
 
 [中文版](README_cn.md)
 
-`openevent-view` is a web service for viewing OpenEvent historical messages. It
-uses `openevent-sdk` to call OpenEvent `Fetch` / `GetStatus` and does not access
-server storage directly.
+`openevent-view` is a web service for OpenEvent history and Channel metadata,
+accessed through the installed SDK without direct storage access. It lists newest
+messages first, supports Channel and recipient filters, and includes system
+messages visible to the caller. Small payloads expand inline; large payloads show
+previews and open their complete content in a new tab.
 
-## Features
+## Documentation
 
-- Built-in frontend page: `GET /`
-- Historical message API: `POST /v1/messages`
-- Descending messages, with newest messages first
-- The frontend does not expose `from_seq` or `limit` inputs; pagination is
-  maintained automatically with `cursor`
-- Optional filtering by `channel_id` and `only_my_recipient`
-- Each message shows OpenEvent top-level fields. Payloads up to 16 KiB are
-  expanded as parsed JSON, UTF-8 text, or base64; larger payloads show a preview
-  and can be opened in a separate full-content page
+The [reference](docs/REFERENCE.md) is authoritative for configuration, HTTP APIs,
+payload representation, and deployment boundaries. This README contains only
+installation, quick start, and verification entry points.
 
-## Run
+## Installation and Startup
 
-`openevent-view` depends on `openevent-sdk>=0.6.0`, `PyYAML`, and
-`orjson>=3.10` being installed in the current Python environment.
-
-If `openevent-sdk` is missing, install `openevent-sdk>=0.6.0` from your normal
-package source before running or testing `openevent-view`.
-
-Build the wheel:
-
-```bash
-make build
-```
-
-The wheel is generated at:
-
-```text
-dist/openevent_view-0.1.0-py3-none-any.whl
-```
-
-Install:
+Python 3.10 or newer is required. [pyproject.toml](pyproject.toml) declares runtime
+dependencies; the SDK minimum is 0.8.0. Actual deployments use the SDK installed
+in the Python environment running View. The SDK submodule is a source reference only.
 
 ```bash
 make install
+openevent-view
 ```
 
-Start in development mode:
+Defaults listen on `127.0.0.1:8080` and connect to OpenEvent at `127.0.0.1:9527`.
+Open the View address in a browser and enter OpenEvent credentials to query
+history. The service targets trusted internal networks by default; read the
+[deployment boundary](docs/REFERENCE.md#1-deployment-boundary) before deployment.
 
-```bash
-PYTHONPATH=src python -m openevent.view --config openevent-view.yaml
-```
-
-Without a configuration file, defaults are used: listen on `127.0.0.1:8080` and
-connect to OpenEvent at `127.0.0.1:9527`.
-
-The listen address can also be overridden:
-
-```bash
-PYTHONPATH=src python -m openevent.view --host 0.0.0.0 --port 8080
-```
-
-After installation, use the command entry point directly:
+For custom configuration, save the [configuration example](docs/REFERENCE.md#2-configuration)
+as a YAML file and run:
 
 ```bash
 openevent-view --config openevent-view.yaml
 ```
 
-## Configuration
+During development, run this repository's source directly:
 
-```yaml
-version: v1
-
-server:
-  host: 127.0.0.1
-  port: 8080
-  request_timeout_seconds: 10
-  max_request_body_bytes: 65536
-
-openevent:
-  target: 127.0.0.1:9527
-  rpc_timeout_seconds: 10
-  channel_cache_size: 4096
-  channel_lookup_workers: 8
-
-history:
-  default_limit: 100
-  max_limit: 1000
-  fetch_batch_size: 1000
+```bash
+PYTHONPATH=src python3 -B -m openevent.view --config openevent-view.yaml
 ```
 
-## API
+`--host` and `--port` override the listen address. Use `make build` to build only;
+release wheels go in `dist/`. Temporary files, caches, and logs stay in `build/`,
+not source directories.
+
+`make install` installs only the unique wheel from the current successful build,
+replacing installed View even at the same version. Dependencies are resolved from
+the package declaration, preserving those already satisfying requirements. Choose
+the environment with `PYTHON`, for example
+`make install PYTHON=/opt/openevent-view/bin/python`. Using `--target`, `--prefix`,
+or `--root` to redirect installation into another environment is not supported.
+
+## Quick Query
+
+Scripts and pages share read-only POST APIs, with credentials in the JSON body:
 
 ```http
 POST /v1/messages
 Content-Type: application/json
 
-{
-  "principal": "10001",
-  "token": "tok_xxx",
-  "cursor": null,
-  "channel_id": "10001",
-  "only_my_recipient": false
-}
+{"principal":"10001","token":"tok_xxx","cursor":null}
 ```
 
-When `cursor` is omitted or `null`, the API returns the newest page. Otherwise,
-pass the returned `next_cursor` object unchanged to load older messages.
-Omitting `only_my_recipient` defaults it to `false`. Every request first calls
-`GetStatus` with its `principal/token`, so invalid credentials return `401` even
-when the cursor is already at the history boundary. Credentials are accepted
-only in the JSON body; there is no authenticated GET variant.
+The response contains `messages` and `next_cursor`. Pass a non-null cursor back
+unchanged to read older messages. See the [HTTP API](docs/REFERENCE.md#4-http-api)
+for complete fields, boundaries, and error rules.
 
-Use the read-only detail endpoint for a complete payload:
+## Verification
 
-```http
-POST /v1/messages/123/payload
-Content-Type: application/json
+Install the declared runtime and `test` optional dependencies in the Python
+environment selected by `PYTHON`, which defaults to `python3`. Frontend tests
+require Node.js 18 or newer. Tests do not automatically install the SDK or load
+code from its submodule.
 
-{
-  "principal": "10001",
-  "token": "tok_xxx"
-}
+```bash
+make test
+make check-docs
 ```
 
-Its page is `GET /message?seq=123`. The page always opens in a new tab, and
-credentials are never placed in the URL or browser storage.
+`make test-python` and `make test-frontend` run the suites separately. End-to-end
+verification uses the current successfully built View wheel and an explicitly
+selected OpenEvent server executable:
 
-```json
-{
-  "messages": [],
-  "next_cursor": null
-}
+```bash
+make e2e OPENEVENT_SERVER_BIN=/path/to/current/build/openevent_server
 ```
+
+When `PYTHON` selects an existing virtual environment, dependency checks, tests,
+and the View process all use that environment's interpreter and installed
+dependencies. For example:
+
+```bash
+make e2e PYTHON=/opt/openevent-view/bin/python \
+  OPENEVENT_SERVER_BIN=/path/to/current/build/openevent_server
+```
+
+The test installs only the current View wheel into `build/e2e/site/` and loads it
+from there. It does not create a child virtual environment or replace View or
+third-party dependencies installed in the selected environment.
+
+Select the server artifact from a successful build of its current version. Test
+configuration, data, and logs stay in `build/e2e/`.

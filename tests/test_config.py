@@ -10,6 +10,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.history.default_limit, 100)
         self.assertEqual(config.history.max_limit, 1000)
         self.assertEqual(config.history.fetch_batch_size, 1000)
+        self.assertEqual(config.server.query_timeout_seconds, 30)
 
     def test_history_constraints(self):
         for value in (True, 0, 1001):
@@ -23,6 +24,9 @@ class ConfigTests(unittest.TestCase):
             parse_config({"server": {"request_timeout_seconds": 0}})
         with self.assertRaises(ConfigError):
             parse_config({"openevent": {"channel_lookup_workers": 65}})
+        for value in (0, True, float("inf"), float("nan")):
+            with self.subTest(value=value), self.assertRaises(ConfigError):
+                parse_config({"server": {"query_timeout_seconds": value}})
 
     def test_cli_overrides_keep_port_validation(self):
         config = parse_config({})

@@ -129,28 +129,7 @@ function initList() {
   function renderMessage(message, query) {
     const card = document.createElement("article");
     card.className = "message-card";
-    const summary = document.createElement("div");
-    summary.className = "message-summary";
-    [
-      ["seq", message.seq],
-      ["uuid", message.uuid],
-      ["time", formatTime(message.ts_ms)],
-      ["channel", `${message.channel_id} ${message.channel_name || ""} · ${message.channel_protocol || "not set"}`],
-      ["principal", message.principal],
-      ["recipients", (message.recipients || []).join(", ") || "[]"],
-      ["objects", (message.object_ids || []).join(", ") || "[]"],
-    ].forEach(([name, value]) => {
-      const field = document.createElement("div");
-      field.className = "field";
-      const label = document.createElement("span");
-      label.className = "field-name";
-      label.textContent = name;
-      const text = document.createElement("span");
-      text.className = "field-value";
-      text.textContent = String(value);
-      field.append(label, text);
-      summary.appendChild(field);
-    });
+    const summary = renderMessageMetadata(message, "message-summary");
     const actions = document.createElement("div");
     actions.className = "message-actions";
     if (message.payload?.truncated) {
@@ -169,20 +148,31 @@ function initList() {
 }
 
 async function request(url, body) {
-  const response = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-    cache: "no-store",
-  });
-  let result;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 35000);
   try {
-    result = await response.json();
-  } catch (_) {
-    throw new Error(`HTTP ${response.status}`);
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      cache: "no-store",
+      signal: controller.signal,
+    });
+    let result;
+    try {
+      result = await response.json();
+    } catch (error) {
+      if (controller.signal.aborted) throw error;
+      throw new Error(`HTTP ${response.status}`);
+    }
+    if (!response.ok) throw new Error(result.error?.message || `HTTP ${response.status}`);
+    return result;
+  } catch (error) {
+    if (controller.signal.aborted) throw new Error("request timed out after 35 seconds");
+    throw error;
+  } finally {
+    clearTimeout(timer);
   }
-  if (!response.ok) throw new Error(result.error?.message || `HTTP ${response.status}`);
-  return result;
 }
 
 function renderPayload(payload) {
@@ -191,35 +181,123 @@ function renderPayload(payload) {
   const title = document.createElement("h2");
   title.textContent = "Payload";
   panel.appendChild(title);
-  if (payload?.json !== undefined) {
-    panel.appendChild(renderJsonNode(payload.json, "payload"));
-  } else if (payload?.preview) {
+  const metadata = document.createElement("div");
+  metadata.className = "payload-meta";
+  metadata.textContent = `encoding: ${payload?.encoding || "unknown"} · size: ${payload?.size_bytes ?? 0} bytes`;
+  panel.appendChild(metadata);
+  if (payload?.preview) {
     const pre = document.createElement("pre");
-    pre.textContent = `encoding: ${payload.encoding}\nsize: ${payload.size_bytes} bytes\nomitted: ${payload.preview.omitted_bytes} bytes\n\nHEAD\n${payload.preview.head}\n\nTAIL\n${payload.preview.tail}`;
+    pre.textContent = `omitted: ${payload.preview.omitted_bytes} bytes\n\nHEAD\n${payload.preview.head}\n\nTAIL\n${payload.preview.tail}`;
     panel.appendChild(pre);
   } else {
+    const text = payload?.text ?? "";
     const pre = document.createElement("pre");
-    pre.textContent = payload?.text || "";
+    let parsed;
+    let isJson = false;
+    if (payload?.encoding === "utf-8") {
+      try {
+        parsed = JSON.parse(text);
+        isJson = true;
+      } catch (_) {
+        // Payload text is also valid when it is not JSON.
+      }
+    }
+    if (isJson) {
+      const tree = document.createElement("div");
+      tree.className = "json-tree";
+      tree.appendChild(renderJsonNode(parsed, "payload", true));
+      const toggle = document.createElement("button");
+      toggle.type = "button";
+      toggle.className = "payload-toggle";
+      toggle.textContent = "View original text";
+      pre.hidden = true;
+      toggle.addEventListener("click", () => {
+        pre.hidden = !pre.hidden;
+        tree.hidden = !pre.hidden;
+        if (!pre.hidden) pre.textContent = text;
+        toggle.textContent = pre.hidden ? "View original text" : "View JSON";
+      });
+      panel.append(toggle, tree);
+    } else {
+      pre.textContent = text;
+    }
     panel.appendChild(pre);
   }
   return panel;
 }
 
-function renderJsonNode(value, label) {
+function renderJsonNode(value, label, initiallyOpen = false) {
   if (value && typeof value === "object") {
+    const isArray = Array.isArray(value);
+    const keys = isArray ? null : Object.keys(value);
+    const size = isArray ? value.length : keys.length;
     const details = document.createElement("details");
-    details.open = true;
+    details.open = initiallyOpen;
     const summary = document.createElement("summary");
-    summary.textContent = `${label} ${Array.isArray(value) ? `[${value.length}]` : `{${Object.keys(value).length}}`}`;
+    summary.textContent = `${label} ${isArray ? `[${size}]` : `{${size}}`}`;
     details.appendChild(summary);
-    Object.entries(value).forEach(([key, item]) => {
-      details.appendChild(renderJsonNode(item, key));
-    });
+    let rendered = 0;
+    let initialized = false;
+    let more = null;
+
+    function appendBatch() {
+      if (more) more.remove();
+      const end = Math.min(rendered + 100, size);
+      for (; rendered < end; rendered += 1) {
+        const key = isArray ? rendered : keys[rendered];
+        details.appendChild(renderJsonNode(value[key], key));
+      }
+      if (rendered < size) {
+        if (!more) {
+          more = document.createElement("button");
+          more.type = "button";
+          more.className = "json-more";
+          more.addEventListener("click", appendBatch);
+        }
+        more.textContent = `Show ${Math.min(100, size - rendered)} more (${size - rendered} remaining)`;
+        details.appendChild(more);
+      }
+    }
+
+    function expand() {
+      if (!details.open || initialized) return;
+      initialized = true;
+      appendBatch();
+    }
+
+    details.addEventListener("toggle", expand);
+    expand();
     return details;
   }
   const line = document.createElement("div");
   line.textContent = `${label}: ${value === null ? "null" : JSON.stringify(value)}`;
   return line;
+}
+
+function renderMessageMetadata(message, className) {
+  const meta = document.createElement("div");
+  meta.className = className;
+  [
+    ["seq", message.seq],
+    ["uuid", message.uuid],
+    ["time", formatTime(message.ts_ms)],
+    ["channel", `${message.channel_id} ${message.channel_name || ""} · ${message.channel_protocol || "not set"}`],
+    ["principal", message.principal],
+    ["recipients", (message.recipients || []).join(", ") || "[]"],
+    ["objects", (message.object_ids || []).join(", ") || "[]"],
+  ].forEach(([name, value]) => {
+    const field = document.createElement("div");
+    field.className = "field";
+    const label = document.createElement("span");
+    label.className = "field-name";
+    label.textContent = name;
+    const text = document.createElement("span");
+    text.className = "field-value";
+    text.textContent = String(value);
+    field.append(label, text);
+    meta.appendChild(field);
+  });
+  return meta;
 }
 
 function formatTime(value) {
@@ -326,6 +404,7 @@ function initDetail() {
     if (credentialsReceived) return;
     clearTimeout(timer);
     window.removeEventListener("message", handler);
+    window.opener = null;
     const content = $("detailContent");
     const form = document.createElement("form");
     form.className = "detail-login";
@@ -367,28 +446,6 @@ function initDetail() {
 
 function renderDetailMessage(message) {
   const container = document.createElement("div");
-  const meta = document.createElement("div");
-  meta.className = "detail-meta";
-  [
-    ["seq", message.seq],
-    ["uuid", message.uuid],
-    ["time", formatTime(message.ts_ms)],
-    ["channel", `${message.channel_id} ${message.channel_name || ""} · ${message.channel_protocol || "not set"}`],
-    ["principal", message.principal],
-    ["recipients", (message.recipients || []).join(", ") || "[]"],
-    ["objects", (message.object_ids || []).join(", ") || "[]"],
-  ].forEach(([name, value]) => {
-    const field = document.createElement("div");
-    field.className = "field";
-    const label = document.createElement("span");
-    label.className = "field-name";
-    label.textContent = name;
-    const text = document.createElement("span");
-    text.className = "field-value";
-    text.textContent = String(value);
-    field.append(label, text);
-    meta.appendChild(field);
-  });
-  container.append(meta, renderPayload(message.payload));
+  container.append(renderMessageMetadata(message, "detail-meta"), renderPayload(message.payload));
   return container;
 }

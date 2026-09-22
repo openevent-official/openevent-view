@@ -2,123 +2,92 @@
 
 [English version](README.md)
 
-`openevent-view` 是 OpenEvent 历史消息查看 Web 服务。它通过 `openevent-sdk`
-调用 OpenEvent `Fetch`/`GetStatus`，不直接访问服务端存储。
+`openevent-view` 是 OpenEvent 历史消息查看 Web 服务，通过已安装的 SDK 读取历史和
+Channel 信息，不直接访问存储。列表按最新消息在前显示，支持 Channel 和 recipient 过滤，
+包括调用方可见的系统消息。小 payload 可以直接展开，大 payload 显示预览并在新标签中
+查看完整内容。
 
-## 功能
+## 文档
 
-- 内置前端页面：`GET /`
-- 历史消息 API：`POST /v1/messages`
-- 按倒序显示，最新消息在前
-- 前端不暴露 `from_seq` 和 `limit` 输入，分页由 `cursor` 自动维护
-- 可选按 `channel_id` 和 `only_my_recipient` 过滤
-- 每条消息展示 OpenEvent 顶层字段。不超过 16 KiB 的 payload 展示解析后的 JSON、UTF-8 文本或 base64；更大的 payload 只显示预览，并可在单独页面查看完整内容
+[使用参考](docs/REFERENCE_cn.md)是配置、HTTP API、payload 表示及部署边界的权威说明。
+本文只保留安装、快速开始和验证入口。
 
-## 运行
+## 安装与启动
 
-`openevent-view` 依赖当前 Python 环境中已安装的 `openevent-sdk>=0.6.0`、
-`PyYAML` 和 `orjson>=3.10`。
-
-如果当前环境尚未安装 `openevent-sdk`，请从常规包来源把
-`openevent-sdk>=0.6.0` 安装到当前 Python 环境后再运行或测试 `openevent-view`。
-
-构建 wheel：
-
-```bash
-make build
-```
-
-wheel 会生成到：
-
-```text
-dist/openevent_view-0.1.0-py3-none-any.whl
-```
-
-安装：
+需要 Python 3.10 或更新版本。运行依赖以 [pyproject.toml](pyproject.toml) 为准；SDK 至少
+为 0.8.0，实际部署时使用运行 View 的 Python 环境中已安装的 SDK，仓库中的 SDK 子模块
+仅供源码参考。
 
 ```bash
 make install
+openevent-view
 ```
 
-开发方式启动：
+默认监听 `127.0.0.1:8080`，连接 `127.0.0.1:9527` 的 OpenEvent 服务。在浏览器中打开
+View 地址，输入 OpenEvent 凭据即可查询。该服务默认面向可信内网，部署前请阅读
+[部署边界](docs/REFERENCE_cn.md#1-部署边界)。
 
-```bash
-PYTHONPATH=src python -m openevent.view --config openevent-view.yaml
-```
-
-不传配置时使用默认值，监听 `127.0.0.1:8080`，OpenEvent 目标为 `127.0.0.1:9527`。
-
-也可以覆盖监听地址：
-
-```bash
-PYTHONPATH=src python -m openevent.view --host 0.0.0.0 --port 8080
-```
-
-安装后可直接使用命令入口：
+需要配置时，将[配置示例](docs/REFERENCE_cn.md#2-配置)保存为 YAML 文件，然后运行：
 
 ```bash
 openevent-view --config openevent-view.yaml
 ```
 
-## 配置
+开发时可直接运行本仓库源码：
 
-```yaml
-version: v1
-
-server:
-  host: 127.0.0.1
-  port: 8080
-  request_timeout_seconds: 10
-  max_request_body_bytes: 65536
-
-openevent:
-  target: 127.0.0.1:9527
-  rpc_timeout_seconds: 10
-  channel_cache_size: 4096
-  channel_lookup_workers: 8
-
-history:
-  default_limit: 100
-  max_limit: 1000
-  fetch_batch_size: 1000
+```bash
+PYTHONPATH=src python3 -B -m openevent.view --config openevent-view.yaml
 ```
 
-## API
+`--host` 和 `--port` 可覆盖监听地址。仅构建发布 wheel 使用 `make build`，产物位于
+`dist/`；临时文件、缓存和日志位于 `build/`，不写入源码目录。
+
+`make install` 只安装本次成功构建的唯一 wheel；即使版本号未变，也替换已安装的 View。
+第三方依赖按包声明补齐，已满足要求的保持不变。用 `PYTHON` 选择安装环境，例如
+`make install PYTHON=/opt/openevent-view/bin/python`；不支持用 `--target`、`--prefix`
+或 `--root` 把安装位置改到另一个环境。
+
+## 快速查询
+
+脚本和页面共用只读 POST 接口，凭据放在 JSON body 中：
 
 ```http
 POST /v1/messages
 Content-Type: application/json
 
-{
-  "principal": "10001",
-  "token": "tok_xxx",
-  "cursor": null,
-  "channel_id": "10001",
-  "only_my_recipient": false
-}
+{"principal":"10001","token":"tok_xxx","cursor":null}
 ```
 
-`cursor` 省略或为 `null` 时返回最新一页；非空时原样传回响应中的 `next_cursor` 对象以加载更早消息。
-`only_my_recipient` 省略时为 `false`。每次查询都会先用本次 `principal/token` 调用 `GetStatus`，因此错误凭据返回
-`401`，即使游标已经位于历史边界也不会返回空页。凭据只接受 JSON body，不提供带鉴权的 GET 变体。
+响应包含 `messages` 和 `next_cursor`。将非空游标原样传回以读取更早消息。完整字段、
+边界和错误规则见[HTTP API](docs/REFERENCE_cn.md#4-http-api)。
 
-完整 Payload 使用只读详情接口：
+## 验证
 
-```http
-POST /v1/messages/123/payload
-Content-Type: application/json
+测试前需要在 `PYTHON` 选定的 Python 环境中安装包声明的运行依赖和 `test` 可选依赖；
+`PYTHON` 默认是 `python3`。前端测试需要 Node.js 18 或更新版本。测试不自动安装 SDK，
+也不从 SDK 子模块加载代码。
 
-{
-  "principal": "10001",
-  "token": "tok_xxx"
-}
+```bash
+make test
+make check-docs
 ```
 
-详情页地址是 `GET /message?seq=123`。页面始终在新标签中打开，凭据不会进入 URL 或浏览器存储。
+也可分别运行 `make test-python` 和 `make test-frontend`。端到端验证使用当前成功构建的
+View wheel，以及显式指定的 OpenEvent 服务端可执行文件：
 
-```json
-{
-  "messages": [],
-  "next_cursor": null
-}
+```bash
+make e2e OPENEVENT_SERVER_BIN=/path/to/current/build/openevent_server
 ```
+
+用 `PYTHON` 选择已有虚拟环境时，依赖检查、测试和 View 进程都使用该环境的解释器与
+已安装依赖，例如：
+
+```bash
+make e2e PYTHON=/opt/openevent-view/bin/python \
+  OPENEVENT_SERVER_BIN=/path/to/current/build/openevent_server
+```
+
+测试仅将本次 View wheel 安装到 `build/e2e/site/` 并从该目录加载，不创建子虚拟环境，
+也不替换选定环境中已安装的 View 或第三方依赖。
+
+服务端请使用当前版本成功构建的产物。测试产生的配置、数据和日志位于 `build/e2e/`。

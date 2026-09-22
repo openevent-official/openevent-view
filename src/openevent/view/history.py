@@ -4,12 +4,12 @@ import base64
 import codecs
 import re
 import threading
+import time
 from collections import OrderedDict
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from dataclasses import dataclass
 from typing import Any, Protocol
 
-import orjson
 import grpc
 
 from .config import HistoryConfig
@@ -18,7 +18,7 @@ from .config import HistoryConfig
 UINT64_MAX = 2**64 - 1
 INLINE_PAYLOAD_BYTES = 16 * 1024
 PREVIEW_PART_BYTES = 8 * 1024
-_UINT64_TEXT = re.compile(r"[1-9][0-9]*\Z")
+_UINT64_TEXT = re.compile(r"(?:0|[1-9][0-9]*)\Z")
 
 
 class RequestError(ValueError):
@@ -33,10 +33,25 @@ class MessageNotFound(LookupError):
     code = "NOT_FOUND"
 
 
-class OpenEventClientProtocol(Protocol):
-    def get_status(self, principal: int, token: str) -> Any: ...
+class QueryTimeout(RuntimeError):
+    code = "QUERY_TIMEOUT"
 
-    def get_channel(self, principal: int, token: str, channel_id: int) -> Any: ...
+
+class QueryDeadline:
+    def __init__(self, seconds: float):
+        self._end = time.monotonic() + seconds
+
+    def remaining(self) -> float:
+        remaining = self._end - time.monotonic()
+        if remaining <= 0:
+            raise QueryTimeout("history query timed out")
+        return remaining
+
+
+class OpenEventClientProtocol(Protocol):
+    def get_status(self, principal: int, token: str, *, timeout: float) -> Any: ...
+
+    def get_channel(self, principal: int, token: str, channel_id: int, *, timeout: float) -> Any: ...
 
     def fetch(
         self,
@@ -46,6 +61,8 @@ class OpenEventClientProtocol(Protocol):
         limit: int,
         only_my_recipient: bool = False,
         channels: tuple[int, ...] = (),
+        *,
+        timeout: float,
     ) -> Any: ...
 
 
@@ -86,9 +103,13 @@ class HistoryService:
         history_config: HistoryConfig,
         channel_cache_size: int = 4096,
         channel_lookup_workers: int = 8,
+        query_timeout_seconds: float = 30.0,
+        rpc_timeout_seconds: float = 10.0,
     ):
         self._client = client
         self._history = history_config
+        self._query_timeout_seconds = query_timeout_seconds
+        self._rpc_timeout_seconds = rpc_timeout_seconds
         self._channel_cache_size = channel_cache_size
         self._channel_cache: OrderedDict[tuple[int, int], ChannelDisplay] = (
             OrderedDict()
@@ -103,28 +124,31 @@ class HistoryService:
         self._channel_executor.shutdown(wait=True, cancel_futures=True)
 
     def query(self, query: HistoryQuery) -> dict[str, Any]:
-        status = self._client.get_status(query.principal, query.token)
+        deadline = QueryDeadline(self._query_timeout_seconds)
+        status = self._call(deadline, self._client.get_status, query.principal, query.token)
         min_seq = int(status.min_seq)
         max_seq = int(status.max_seq)
-        messages: list[Any] = []
+        messages: list[dict[str, Any]] = []
         fetch_performed = False
+        history_complete = True
 
-        if min_seq > 0 and max_seq > 0 and query.before_seq != 1:
+        if query.before_seq != 0:
             end_seq = max_seq
             if query.before_seq is not None:
                 end_seq = min(end_seq, query.before_seq - 1)
             if end_seq >= min_seq:
-                messages, fetch_performed = self._query_descending(
-                    query, min_seq, end_seq
+                messages, fetch_performed, history_complete = self._query_descending(
+                    query, min_seq, end_seq, deadline
                 )
 
-        channel_ids = {int(message.channel_id) for message in messages}
+        channel_ids = {int(message["channel_id"]) for message in messages}
         if query.channel_id is not None:
             channel_ids.add(query.channel_id)
         displays = self._load_channel_displays(
             query.principal,
             query.token,
             channel_ids,
+            deadline,
             force_channel_id=(
                 query.channel_id
                 if query.channel_id is not None and not fetch_performed
@@ -132,95 +156,87 @@ class HistoryService:
             ),
         )
 
+        for message in messages:
+            message.update(displays[int(message["channel_id"])].to_dict())
+        deadline.remaining()
         result: dict[str, Any] = {
-            "messages": [
-                self._message_to_dict(message, displays, full_payload=False)
-                for message in messages
-            ],
-            "next_cursor": self._next_cursor(messages, query.limit, min_seq),
+            "messages": messages,
+            "next_cursor": self._next_cursor(messages, history_complete),
         }
         if query.channel_id is not None:
             result["channel"] = displays[query.channel_id].to_dict()
         return result
 
     def get_payload(self, seq: int, query: PayloadQuery) -> dict[str, Any]:
-        status = self._client.get_status(query.principal, query.token)
+        deadline = QueryDeadline(self._query_timeout_seconds)
+        status = self._call(deadline, self._client.get_status, query.principal, query.token)
         min_seq = int(status.min_seq)
         max_seq = int(status.max_seq)
-        if min_seq == 0 or max_seq == 0 or seq < min_seq or seq > max_seq:
+        if seq < min_seq or seq > max_seq:
             raise MessageNotFound("message not found")
 
-        fetch_from = seq
-        while fetch_from <= seq:
-            try:
-                response = self._client.fetch(
-                    query.principal,
-                    query.token,
-                    from_seq=fetch_from,
-                    limit=1,
-                    only_my_recipient=False,
-                    channels=(),
-                )
-            except grpc.RpcError as exc:
-                if exc.code() in {grpc.StatusCode.PERMISSION_DENIED, grpc.StatusCode.NOT_FOUND}:
-                    raise MessageNotFound("message not found") from exc
-                raise
-            next_seq = int(response.next_seq)
-            if next_seq <= fetch_from:
+        try:
+            response = self._call(
+                deadline, self._client.fetch,
+                query.principal, query.token, from_seq=seq, limit=1,
+                only_my_recipient=False, channels=(),
+            )
+            if int(response.next_seq) <= seq:
                 raise UpstreamProtocolError("OpenEvent Fetch next_seq did not advance")
             for message in response.messages:
-                message_seq = int(message.seq)
-                if message_seq == seq:
-                    try:
-                        displays = self._load_channel_displays(
-                            query.principal,
-                            query.token,
-                            {int(message.channel_id)},
-                        )
-                    except grpc.RpcError as exc:
-                        if exc.code() in {grpc.StatusCode.PERMISSION_DENIED, grpc.StatusCode.NOT_FOUND}:
-                            raise MessageNotFound("message not found") from exc
-                        raise
-                    return {
-                        "message": self._message_to_dict(
-                            message, displays, full_payload=True
-                        )
-                    }
-                if message_seq > seq:
-                    raise MessageNotFound("message not found")
-            fetch_from = next_seq
+                if int(message.seq) == seq:
+                    displays = self._load_channel_displays(
+                        query.principal, query.token, {int(message.channel_id)}, deadline,
+                    )
+                    result = self._message_to_dict(message, full_payload=True)
+                    result.update(displays[int(message.channel_id)].to_dict())
+                    deadline.remaining()
+                    return {"message": result}
+        except grpc.RpcError as exc:
+            if exc.code() in {grpc.StatusCode.PERMISSION_DENIED, grpc.StatusCode.NOT_FOUND}:
+                raise MessageNotFound("message not found") from exc
+            raise
         raise MessageNotFound("message not found")
 
+    def _call(self, deadline: QueryDeadline, method, *args, **kwargs):
+        timeout = min(self._rpc_timeout_seconds, deadline.remaining())
+        try:
+            result = method(*args, **kwargs, timeout=timeout)
+        except grpc.RpcError:
+            deadline.remaining()
+            raise
+        deadline.remaining()
+        return result
+
     def _query_descending(
-        self, query: HistoryQuery, min_seq: int, end_seq: int
-    ) -> tuple[list[Any], bool]:
-        collected: list[Any] = []
+        self, query: HistoryQuery, min_seq: int, end_seq: int, deadline: QueryDeadline
+    ) -> tuple[list[dict[str, Any]], bool, bool]:
+        collected: list[dict[str, Any]] = []
         window_end = end_seq
         channels = (query.channel_id,) if query.channel_id is not None else ()
         fetch_performed = False
+        history_complete = False
 
         while window_end >= min_seq and len(collected) < query.limit:
+            deadline.remaining()
             remaining = query.limit - len(collected)
-            window_size = min(remaining, self._history.fetch_batch_size)
+            window_size = self._history.fetch_batch_size
             window_start = max(min_seq, window_end - window_size + 1)
-            window_messages = self._fetch_window(
+            window_messages, matched_count = self._fetch_window(
                 query,
                 channels,
                 window_start,
                 window_end,
                 window_size,
+                remaining,
+                deadline,
             )
             fetch_performed = True
-            matches = [
-                message
-                for message in window_messages
-                if self._matches_query(message, query)
-            ]
-            matches.sort(key=lambda message: int(message.seq), reverse=True)
-            collected.extend(matches[:remaining])
+            collected.extend(window_messages)
+            history_complete = window_start == min_seq and matched_count <= remaining
             window_end = window_start - 1
 
-        return collected, fetch_performed
+        return collected, fetch_performed, history_complete
 
     def _fetch_window(
         self,
@@ -229,11 +245,15 @@ class HistoryService:
         window_start: int,
         window_end: int,
         window_size: int,
-    ) -> list[Any]:
+        candidate_limit: int,
+        deadline: QueryDeadline,
+    ) -> tuple[list[dict[str, Any]], int]:
         fetch_from = window_start
-        messages: list[Any] = []
+        messages: list[dict[str, Any]] = []
+        matched_count = 0
         while fetch_from <= window_end:
-            response = self._client.fetch(
+            response = self._call(
+                deadline, self._client.fetch,
                 query.principal,
                 query.token,
                 from_seq=fetch_from,
@@ -244,51 +264,47 @@ class HistoryService:
             next_seq = int(response.next_seq)
             if next_seq <= fetch_from:
                 raise UpstreamProtocolError("OpenEvent Fetch next_seq did not advance")
-            messages.extend(
-                message
-                for message in response.messages
+            candidates = [
+                message for message in response.messages
                 if window_start <= int(message.seq) <= window_end
-            )
+            ]
+            matched_count += len(candidates)
+            candidates.sort(key=lambda message: int(message.seq), reverse=True)
+            # Older entries in this response cannot make the page. Select before
+            # decoding payloads, while still scanning every response in the window.
+            for message in candidates[:candidate_limit]:
+                deadline.remaining()
+                messages.append(self._message_to_dict(message, full_payload=False))
+            messages.sort(key=lambda message: int(message["seq"]), reverse=True)
+            del messages[candidate_limit:]
+            # Keep only the projections; release the RPC payload before the next Fetch.
+            message = None
+            del candidates
+            del response
             fetch_from = next_seq
-        return messages
-
-    @staticmethod
-    def _matches_query(message: Any, query: HistoryQuery) -> bool:
-        if query.channel_id is not None and int(message.channel_id) != query.channel_id:
-            return False
-        if query.only_my_recipient and query.principal not in {
-            int(recipient) for recipient in message.recipients
-        }:
-            return False
-        return True
+        return messages, matched_count
 
     @staticmethod
     def _next_cursor(
-        messages: list[Any], requested_limit: int, min_seq: int
+        messages: list[dict[str, Any]], history_complete: bool
     ) -> dict[str, str] | None:
-        if len(messages) < requested_limit or not messages:
+        if history_complete or not messages:
             return None
-        before_seq = int(messages[-1].seq)
-        if before_seq <= min_seq:
-            return None
+        before_seq = int(messages[-1]["seq"])
         return {"before_seq": str(before_seq)}
 
     def _message_to_dict(
         self,
         message: Any,
-        displays: dict[int, ChannelDisplay],
         *,
         full_payload: bool,
     ) -> dict[str, Any]:
         channel_id = int(message.channel_id)
-        display = displays[channel_id]
         return {
             "seq": str(int(message.seq)),
             "uuid": str(int(message.uuid)),
             "ts_ms": str(int(message.ts_ms)),
             "channel_id": str(channel_id),
-            "channel_name": display.name,
-            "channel_protocol": display.protocol,
             "principal": str(int(message.principal)),
             "recipients": [str(int(item)) for item in message.recipients],
             "object_ids": [
@@ -302,11 +318,13 @@ class HistoryService:
         principal: int,
         token: str,
         channel_ids: set[int],
+        deadline: QueryDeadline,
         force_channel_id: int | None = None,
     ) -> dict[int, ChannelDisplay]:
         displays: dict[int, ChannelDisplay] = {}
         missing: list[int] = []
         for channel_id in sorted(channel_ids):
+            deadline.remaining()
             cached = None
             if channel_id != force_channel_id:
                 cached = self._get_cached_channel(principal, channel_id)
@@ -317,20 +335,27 @@ class HistoryService:
 
         futures = {
             channel_id: self._channel_executor.submit(
-                self._get_channel, principal, token, channel_id
+                self._get_channel, principal, token, channel_id, deadline
             )
             for channel_id in missing
         }
-        for channel_id, future in futures.items():
-            display = future.result()
-            displays[channel_id] = display
-            self._cache_channel(principal, display)
+        try:
+            for channel_id, future in futures.items():
+                try:
+                    display = future.result(timeout=deadline.remaining())
+                except FutureTimeoutError as exc:
+                    raise QueryTimeout("history query timed out") from exc
+                displays[channel_id] = display
+                self._cache_channel(principal, display)
+        finally:
+            for future in futures.values():
+                future.cancel()
         return displays
 
     def _get_channel(
-        self, principal: int, token: str, channel_id: int
+        self, principal: int, token: str, channel_id: int, deadline: QueryDeadline
     ) -> ChannelDisplay:
-        response = self._client.get_channel(principal, token, channel_id)
+        response = self._call(deadline, self._client.get_channel, principal, token, channel_id)
         return ChannelDisplay(
             channel_id=channel_id,
             name=str(response.channel.name),
@@ -357,7 +382,7 @@ class HistoryService:
 
 
 def parse_history_query(data: dict[str, Any], config: HistoryConfig) -> HistoryQuery:
-    principal = _required_uint64_text(data.get("principal"), "principal")
+    principal = _required_uint64_text(data.get("principal"), "principal", positive=True)
     token = _required_string(data.get("token"), "token")
     before_seq = _parse_cursor(data.get("cursor"))
 
@@ -392,7 +417,7 @@ def parse_history_query(data: dict[str, Any], config: HistoryConfig) -> HistoryQ
 
 def parse_payload_query(data: dict[str, Any]) -> PayloadQuery:
     return PayloadQuery(
-        principal=_required_uint64_text(data.get("principal"), "principal"),
+        principal=_required_uint64_text(data.get("principal"), "principal", positive=True),
         token=_required_string(data.get("token"), "token"),
     )
 
@@ -441,16 +466,10 @@ def _encode_complete_payload(payload: bytes) -> dict[str, Any]:
         "size_bytes": len(payload),
     }
     try:
-        text = payload.decode("utf-8")
+        result["text"] = payload.decode("utf-8")
     except UnicodeDecodeError:
         result["encoding"] = "base64"
         result["text"] = base64.b64encode(payload).decode("ascii")
-        return result
-
-    try:
-        result["json"] = orjson.loads(payload)
-    except orjson.JSONDecodeError:
-        result["text"] = text
     return result
 
 
@@ -499,10 +518,10 @@ def _required_string(value: Any, field: str) -> str:
     return value
 
 
-def _required_uint64_text(value: Any, field: str) -> int:
-    if not isinstance(value, str) or _UINT64_TEXT.fullmatch(value) is None:
+def _required_uint64_text(value: Any, field: str, *, positive: bool = False) -> int:
+    if not isinstance(value, str) or len(value) > 20 or _UINT64_TEXT.fullmatch(value) is None:
         raise RequestError(f"{field} must be a canonical uint64 decimal string")
     parsed = int(value)
-    if parsed > UINT64_MAX:
+    if parsed > UINT64_MAX or (positive and parsed == 0):
         raise RequestError(f"{field} must be a canonical uint64 decimal string")
     return parsed

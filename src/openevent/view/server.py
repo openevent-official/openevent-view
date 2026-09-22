@@ -14,6 +14,7 @@ from .config import ViewConfig
 from .history import (
     HistoryService,
     MessageNotFound,
+    QueryTimeout,
     RequestError,
     UpstreamProtocolError,
     parse_history_query,
@@ -54,6 +55,14 @@ class ViewHTTPServer(ThreadingHTTPServer):
 def make_handler() -> type[BaseHTTPRequestHandler]:
     class ViewRequestHandler(BaseHTTPRequestHandler):
         server: ViewHTTPServer
+
+        def handle_one_request(self) -> None:
+            self._response_started = False
+            try:
+                super().handle_one_request()
+            except (ConnectionError, socket.timeout):
+                # Also covers a disconnect while reading headers or sending an error.
+                self.close_connection = True
 
         def do_GET(self) -> None:
             parsed = urlparse(self.path)
@@ -122,8 +131,18 @@ def make_handler() -> type[BaseHTTPRequestHandler]:
             return body
 
         def _handle_error(self, exc: Exception) -> None:
+            if isinstance(exc, ConnectionError):
+                self.close_connection = True
+                return
+            if self._response_started:
+                self.close_connection = True
+                if not isinstance(exc, (socket.timeout, TimeoutError)):
+                    LOGGER.exception("response failed")
+                return
             if isinstance(exc, JsonResponseError):
                 self._send_error_json(exc.status, exc.code, exc.message)
+            elif isinstance(exc, QueryTimeout):
+                self._send_error_json(504, exc.code, str(exc))
             elif isinstance(exc, (socket.timeout, TimeoutError)):
                 self._send_error_json(408, "REQUEST_TIMEOUT", "request timed out")
             elif isinstance(exc, RequestError):
@@ -146,6 +165,7 @@ def make_handler() -> type[BaseHTTPRequestHandler]:
             self._send_bytes(body, content_type)
 
         def _send_bytes(self, body: bytes, content_type: str, status: int = 200) -> None:
+            self._response_started = True
             self.send_response(status)
             self.send_header("Content-Type", content_type)
             self.send_header("Cache-Control", "no-store")
