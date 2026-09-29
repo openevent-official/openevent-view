@@ -95,6 +95,13 @@ function createApp(detail = false, options = {}) {
     window,
     location: { href: options.href || "http://view/message?seq=0", origin: "http://view" },
     URL, AbortController,
+    JSON: {
+      parse: (text) => {
+        options.onJsonParse?.(text);
+        return JSON.parse(text);
+      },
+      stringify: JSON.stringify,
+    },
     fetch: (...args) => fetchImpl(...args),
     setTimeout: (callback, delay) => {
       const id = ++timerId;
@@ -222,6 +229,98 @@ test("detail request supports seq zero and restores credential entry after timeo
   assert.ok(retryForm.elements.every((control) => !control.disabled));
   assert.match(app.ids.get("detailStatus").textContent, /timed out/);
   assert.equal(app.timers.size, 0);
+});
+
+test("list payloads stay unparsed until expanded and reuse their content when reopened", async () => {
+  const parsed = [];
+  const app = createApp(false, { onJsonParse: (text) => parsed.push(text) });
+  const payload = utf8Payload(JSON.stringify(Array.from({ length: 205 }, (_, index) => index)));
+  app.setFetch(async () => response({
+    messages: Array.from({ length: 1000 }, (_, index) => ({ ...message, seq: String(index), payload })),
+  }));
+  app.ids.get("principalInput").value = "2";
+  await app.ids.get("queryForm").fire("submit");
+  await settled();
+  const panels = app.ids.get("messageList").children.map((card) => card.children[1]);
+  assert.equal(panels.length, 1000);
+  assert.deepEqual(parsed, [], "a full list does not parse any payload JSON");
+  for (const panel of panels) {
+    assert.equal(panel.tagName, "details");
+    assert.equal(panel.open, false);
+    assert.equal(panel.children.length, 1, "no payload content exists before expansion");
+    const summary = panel.children[0];
+    assert.equal(summary.tagName, "summary");
+    assert.equal(summary.children[0].textContent, `encoding: utf-8 · size: ${payload.size_bytes} bytes`);
+  }
+
+  const panel = panels[0];
+  panel.open = true;
+  await panel.fire("toggle");
+  assert.deepEqual(parsed, [payload.text]);
+  const tree = panel.children.find((node) => node.className === "json-tree");
+  const root = tree.children[0];
+  assert.equal(root.children.length, 102, "opening creates only the first JSON batch");
+  await root.children.at(-1).fire("click");
+  assert.equal(root.children.length, 202);
+  await panel.children.find((node) => node.className === "payload-toggle").fire("click");
+  const pre = panel.children.at(-1);
+  assert.equal(pre.textContent, payload.text);
+  assert.equal(pre.hidden, false);
+  const content = [...panel.children];
+  panel.open = false;
+  await panel.fire("toggle");
+  panel.open = true;
+  await panel.fire("toggle");
+  assert.deepEqual(parsed, [payload.text], "reopening does not parse again");
+  assert.equal(panel.children.length, content.length);
+  content.forEach((node, index) => assert.equal(panel.children[index], node));
+  assert.equal(root.children.length, 202, "expanded batches are retained");
+  assert.equal(pre.hidden, false, "the original-text selection is retained");
+  assert.equal(panels[1].children.length, 1, "other messages remain unrendered");
+});
+
+test("collapsed payloads preserve plain text, Base64, and preview content on expansion", async () => {
+  const cases = [
+    { payload: utf8Payload("中文 is not JSON"), parses: 1 },
+    { payload: utf8Payload(""), parses: 1 },
+    { payload: { encoding: "base64", text: "1234", size_bytes: 3, truncated: false }, parses: 0 },
+    ...["utf-8", "base64"].map((encoding) => ({
+      payload: { encoding, truncated: true, size_bytes: 40000,
+        preview: { head: "1234", tail: "5678", omitted_bytes: 39992 } },
+      parses: 0,
+    })),
+  ];
+  for (const { payload, parses } of cases) {
+    const parsed = [];
+    const app = createApp(false, { onJsonParse: (text) => parsed.push(text) });
+    const panel = app.context.renderPayload(payload, { collapsed: true });
+    assert.equal(panel.children.length, 1);
+    assert.equal(parsed.length, 0);
+    panel.open = true;
+    await panel.fire("toggle");
+    assert.equal(parsed.length, parses);
+    assert.equal(panel.children.length, 2);
+    assert.equal(panel.children[1].tagName, "pre");
+    assert.equal(panel.children[1].textContent, payload.preview
+      ? `omitted: ${payload.preview.omitted_bytes} bytes\n\nHEAD\n${payload.preview.head}\n\nTAIL\n${payload.preview.tail}`
+      : payload.text);
+  }
+});
+
+test("detail pages render payload JSON immediately without a collapsed wrapper", async () => {
+  const parsed = [];
+  const app = createApp(true, { onJsonParse: (text) => parsed.push(text) });
+  app.setFetch(async () => response({ message }));
+  const form = app.ids.get("detailContent").children[0];
+  form.elements[0].value = "2";
+  form.elements[1].value = "secret";
+  await form.fire("submit");
+  const panel = app.ids.get("detailContent").children[0].children[1];
+  assert.equal(panel.tagName, "div");
+  assert.deepEqual(parsed, [message.payload.text]);
+  const tree = panel.children.find((node) => node.className === "json-tree");
+  assert.equal(tree.children[0].open, true);
+  assert.equal(tree.children[0].children[1].textContent, "ready: true");
 });
 
 test("a large array creates only its first batch, and nested branches load on expansion", async () => {

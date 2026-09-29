@@ -15,7 +15,7 @@ Channel 信息，不直接访问存储。列表按最新消息在前显示，支
 ## 安装与启动
 
 需要 Python 3.10 或更新版本。运行依赖以 [pyproject.toml](pyproject.toml) 为准；SDK 至少
-为 0.8.0，实际部署时使用运行 View 的 Python 环境中已安装的 SDK，仓库中的 SDK 子模块
+为 0.11.1，实际部署时使用运行 View 的 Python 环境中已安装的 SDK，仓库中的 SDK 子模块
 仅供源码参考。
 
 ```bash

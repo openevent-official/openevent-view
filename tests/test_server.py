@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 import grpc
 
+from openevent.sdk.proto import openevent_pb2
 from openevent.view.config import parse_config
 from openevent.view.history import HistoryService, QueryTimeout
 from openevent.view.server import _grpc_to_http, create_server
@@ -30,13 +31,13 @@ def message(seq, payload=b'{"n":1}'):
 
 class FakeClient:
     def __init__(self):
-        system = message(0, payload=b'{"kind":"system.initialization"}')
+        system = message(0, payload=b'{"kind":"system.initialization","data":{"schema_version":1}}')
         system.uuid = system.principal = system.channel_id = 0
         system.recipients = system.object_keys = []
         self.messages = [system, message(1)]
 
     def get_status(self, principal, token, *, timeout):
-        return types.SimpleNamespace(min_seq=0, max_seq=1)
+        return openevent_pb2.GetStatusResponse(max_seq=self.messages[-1].seq)
 
     def get_channel(self, principal, token, channel_id, *, timeout):
         return types.SimpleNamespace(
@@ -59,10 +60,11 @@ class FakeClient:
             for item in self.messages
             if item.seq >= from_seq and (not channels or item.channel_id in channels)
         ][:limit]
+        max_seq = self.messages[-1].seq
         return types.SimpleNamespace(
             messages=messages,
-            next_seq=messages[-1].seq + 1 if messages else 2,
-            last_seq=1,
+            next_seq=messages[-1].seq + 1 if messages else max_seq + 1,
+            last_seq=max_seq,
         )
 
 
@@ -169,9 +171,32 @@ class ServerTests(unittest.TestCase):
         )
         self.assertEqual(status, 200)
         self.assertEqual(body["message"]["seq"], "0")
-        self.assertEqual(body["message"]["payload"]["text"], '{"kind":"system.initialization"}')
+        self.assertEqual(body["message"]["payload"]["text"], self.client.messages[0].payload.decode("utf-8"))
         status, _, _ = self.request("GET", "/message?seq=0")
         self.assertEqual(status, 200)
+
+    def test_sdk_status_supports_initial_history_detail_and_boundary_cursor(self):
+        self.client.messages = self.client.messages[:1]
+        credentials = {"principal": "1", "token": "t"}
+        status, _, body = self.request_json("POST", "/v1/messages", credentials)
+        self.assertEqual(status, 200)
+        self.assertEqual([item["seq"] for item in body["messages"]], ["0"])
+        self.assertIsNone(body["next_cursor"])
+
+        status, _, body = self.request_json("POST", "/v1/messages/0/payload", credentials)
+        self.assertEqual(status, 200)
+        self.assertEqual(body["message"]["seq"], "0")
+
+        status, _, body = self.request_json(
+            "POST", "/v1/messages", {**credentials, "cursor": {"before_seq": "0"}}
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(body["messages"], [])
+        self.assertIsNone(body["next_cursor"])
+
+        status, _, body = self.request_json("POST", "/v1/messages/1/payload", credentials)
+        self.assertEqual(status, 404)
+        self.assertEqual(body["error"]["code"], "NOT_FOUND")
 
     def test_total_query_timeout_maps_to_gateway_timeout(self):
         def timed_out(query):

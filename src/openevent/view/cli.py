@@ -23,7 +23,7 @@ def main(argv: list[str] | None = None) -> int:
         from .upstream import HistoryClient
     except ImportError as exc:
         raise SystemExit(
-            "failed to import openevent-sdk; install openevent-sdk>=0.8.0 "
+            "failed to import openevent-sdk; install openevent-sdk>=0.11.1 "
             "before starting openevent-view"
         ) from exc
 

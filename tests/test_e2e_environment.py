@@ -72,7 +72,7 @@ assert Path(sdk.__file__).resolve().is_relative_to(Path(os.environ["EXPECTED_PAR
 assert sdk.ORIGIN == "selected environment"
 assert Path(view.__file__).resolve().is_relative_to(site)
 assert view.ORIGIN == "current build"
-assert importlib.metadata.version("openevent-sdk") == "0.8.1"
+assert importlib.metadata.version("openevent-sdk") == "0.11.1"
 assert os.environ["PYTHONPATH"] == str(site)
 command = site / "bin/openevent-view"
 cli = subprocess.check_output([str(command)], text=True).strip()
@@ -116,7 +116,7 @@ Path(os.environ["OPENEVENT_VIEW_E2E_DIR"], "runner.json").write_text(json.dumps(
             "openevent_view-9.9.0.dist-info/entry_points.txt": (
                 "[console_scripts]\nopenevent-view = openevent.view:main\n"
             ),
-        }, requires=("openevent-sdk>=0.8.0",))
+        }, requires=("openevent-sdk>=0.11.1",))
 
     def run_e2e(self):
         environment = dict(self.environment)
@@ -137,7 +137,7 @@ Path(os.environ["OPENEVENT_VIEW_E2E_DIR"], "runner.json").write_text(json.dumps(
         }
 
     def test_parent_environment_dependencies_and_current_view_are_used_without_reinstallation(self):
-        self.install_sdk("0.8.1")
+        self.install_sdk("0.11.1")
         self.write_view(self.wheels, "previous installation")
         self.install(self.wheels / "openevent_view-9.9.0-py3-none-any.whl")
         before = self.installed_snapshot()
@@ -160,12 +160,12 @@ Path(os.environ["OPENEVENT_VIEW_E2E_DIR"], "runner.json").write_text(json.dumps(
         self.assertEqual(before, self.installed_snapshot())
 
     def test_incompatible_sdk_fails_before_installing_view_or_running_tests(self):
-        self.install_sdk("0.7.9")
+        self.install_sdk("0.11.0")
         before = self.installed_snapshot()
         result = self.run_e2e()
         self.assertNotEqual(result.returncode, 0, result.stdout)
         self.assertIn("openevent-sdk", result.stdout)
-        self.assertIn("0.7.9", result.stdout)
+        self.assertIn("0.11.0", result.stdout)
         self.assertFalse((self.project / "build/e2e/runner.json").exists())
         self.assertFalse((self.project / "build/e2e/site/openevent/view").exists())
         self.assertEqual(before, self.installed_snapshot())

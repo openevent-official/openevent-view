@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 import grpc
 
+from openevent.sdk.proto import openevent_pb2
 from openevent.view.config import HistoryConfig
 from openevent.view.history import (
     HistoryService,
@@ -27,7 +28,7 @@ def message(seq, channel=7, payload=b'{"n":1}', principal=100, recipients=(100,)
         return types.SimpleNamespace(
             seq=0, uuid=0, ts_ms=1700000000000, channel_id=0, principal=0,
             recipients=[], object_keys=[],
-            payload=b'{"kind":"system.initialization","data":{"schema_version":1},"timestamps":{"event_ms":1700000000000}}',
+            payload=b'{"kind":"system.initialization","data":{"schema_version":1}}',
         )
     return types.SimpleNamespace(
         seq=seq,
@@ -52,9 +53,8 @@ class FakeRpcError(grpc.RpcError):
 
 
 class FakeClient:
-    def __init__(self, messages, min_seq=0, max_seq=None):
+    def __init__(self, messages, max_seq=None):
         self.messages = sorted([message(0)] + list(messages), key=lambda item: item.seq)
-        self.min_seq = min_seq
         self.max_seq = max_seq if max_seq is not None else (
             self.messages[-1].seq if self.messages else 0
         )
@@ -65,7 +65,7 @@ class FakeClient:
     def get_status(self, principal, token, *, timeout):
         self.timeouts.append(timeout)
         self.calls.append(("status", principal, token))
-        return types.SimpleNamespace(min_seq=self.min_seq, max_seq=self.max_seq)
+        return openevent_pb2.GetStatusResponse(max_seq=self.max_seq)
 
     def fetch(
         self,

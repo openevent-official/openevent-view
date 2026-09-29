@@ -5,7 +5,7 @@
 本文是 View 的配置、HTTP API 和部署边界的唯一权威说明。安装和启动见
 [README](../README_cn.md)；上游历史、认证和权限语义见
 [OpenEvent API](../openevent-sdk/docs/API_cn.md)。View 是只读查看工具，通过部署时运行
-View 的 Python 环境中已安装的 `openevent-sdk>=0.8.0` 访问 OpenEvent，不直接读取服务端存储。
+View 的 Python 环境中已安装的 `openevent-sdk>=0.11.1` 访问 OpenEvent，不直接读取服务端存储。
 
 ## 1. 部署边界
 
@@ -91,11 +91,13 @@ HTTP socket 超时、单次 RPC 超时和整次查询预算是三个不同限制
 请求在 35 秒后自动取消等待；关闭页面也可放弃等待。浏览器停止等待不保证服务端
 立即停止工作，服务端仍由自己的查询预算限制。
 
-每条消息显示顶层元数据和 payload，并标明 payload 编码和原始字节数，包括列表预览。
-完整 UTF-8 文本由浏览器尝试按 JSON 渲染；解析成功时默认显示树，可切换查看原文，失败时
+每条消息显示顶层元数据和 payload 的编码、原始字节数。列表中的 payload 默认折叠，
+首次展开时才创建正文或预览，并尝试解析完整 UTF-8 文本中的 JSON；之后折叠再展开会复用
+已有内容，不重复解析。详情页取得消息后直接显示完整 payload，无需先展开。
+完整 UTF-8 文本解析成功时默认显示 JSON 树，可切换查看原文，失败时
 直接显示原文。JSON 的对象、数组按需展开，每批显示 100 个直接子项，其余通过“显示更多”
 继续查看。JSON 树遵循 JavaScript 数字规则，可能无法精确表示大整数，核对内容以原文为准。
-大 payload 在列表中显示预览，通过新标签查看完整内容。外部字段和错误信息只作为文本
+大 payload 在列表中展开后显示预览，通过新标签查看完整内容。外部字段和错误信息只作为文本
 或 JSON 节点展示，不作为 HTML 或脚本执行。
 
 ## 4. HTTP API
@@ -111,8 +113,9 @@ HTTP socket 超时、单次 RPC 超时和整次查询预算是三个不同限制
 `limit`、payload 字节数等有界计数使用 JSON number。本规则不改变不透明 payload 自身的数字表示。
 
 每次历史和详情查询都先用本次 `principal/token` 调用 `GetStatus`。即使游标已到历史边界，
-无效凭据仍返回 `401`。`min_seq=0` 是有效初始化状态，`max_seq=0` 表示只有初始化消息，
-不表示历史为空。View 可显示 seq 0 和 Channel 0 中的消息，其可见性仍由 OpenEvent 决定。
+无效凭据仍返回 `401`。历史下界固定为 seq 0，`GetStatus` 只返回 `max_seq`；
+`max_seq=0` 表示只有初始化消息，不表示历史为空。View 可显示 seq 0 和 Channel 0 中的
+消息，其可见性仍由 OpenEvent 决定。
 
 ### 4.2 查询历史
 

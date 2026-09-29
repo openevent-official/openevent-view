@@ -6,7 +6,7 @@ This document is the authoritative reference for View configuration, HTTP APIs,
 and deployment boundaries. See the [README](../README.md) for installation and
 startup, and the [OpenEvent API](../openevent-sdk/docs/API.md) for upstream history,
 authentication, and permission semantics. View is a read-only tool that uses
-`openevent-sdk>=0.8.0` installed in the Python environment running the deployment;
+`openevent-sdk>=0.11.1` installed in the Python environment running the deployment;
 it does not read server storage directly.
 
 ## 1. Deployment Boundary
@@ -111,14 +111,17 @@ waiting after 35 seconds; closing the page also abandons the wait. Browser
 cancellation does not guarantee that server work immediately
 stops; the server still applies its own query budget.
 
-Messages display their top-level metadata and payload, with the payload encoding
-and original byte count also shown for list previews. The browser attempts to
-render complete UTF-8 text as JSON. Successful parsing shows a tree by default,
+Messages display their top-level metadata and the payload encoding and original
+byte count. List payloads start collapsed. Their first expansion creates the body
+or preview and attempts to parse complete UTF-8 text as JSON; later collapses and
+expansions reuse that content without parsing again. Detail pages show the complete
+payload as soon as the message is received, without requiring an initial expansion.
+Successful parsing of complete UTF-8 text shows a JSON tree by default,
 with a switch to the original text; failures show the original text directly.
 JSON objects and arrays expand on demand, showing 100 direct children per batch
 and a Show more control for the rest. The tree follows JavaScript number rules
 and may not preserve large integers exactly; use the original text to verify content.
-Large payloads show a list preview and open complete content in a new tab.
+Large payloads show a list preview when expanded and open complete content in a new tab.
 External fields and errors are rendered as text or JSON nodes, never HTML or scripts.
 
 ## 4. HTTP API
@@ -138,8 +141,9 @@ sizes use JSON numbers. This rule does not change numbers inside opaque payloads
 
 Every history and detail query first calls `GetStatus` with that request's
 `principal/token`. Invalid credentials return `401` even at a history boundary.
-`min_seq=0` is a valid initialized state; `max_seq=0` means only the initialization
-message exists, not empty history. View can display seq 0 and messages in Channel 0;
+History starts at the fixed lower bound seq 0, and `GetStatus` returns only `max_seq`.
+`max_seq=0` means only the initialization message exists, not empty history.
+View can display seq 0 and messages in Channel 0;
 OpenEvent still determines visibility.
 
 ### 4.2 Query History

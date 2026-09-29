@@ -17,7 +17,7 @@ installation, quick start, and verification entry points.
 ## Installation and Startup
 
 Python 3.10 or newer is required. [pyproject.toml](pyproject.toml) declares runtime
-dependencies; the SDK minimum is 0.8.0. Actual deployments use the SDK installed
+dependencies; the SDK minimum is 0.11.1. Actual deployments use the SDK installed
 in the Python environment running View. The SDK submodule is a source reference only.
 
 ```bash

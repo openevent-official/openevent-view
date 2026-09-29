@@ -126,7 +126,6 @@ class HistoryService:
     def query(self, query: HistoryQuery) -> dict[str, Any]:
         deadline = QueryDeadline(self._query_timeout_seconds)
         status = self._call(deadline, self._client.get_status, query.principal, query.token)
-        min_seq = int(status.min_seq)
         max_seq = int(status.max_seq)
         messages: list[dict[str, Any]] = []
         fetch_performed = False
@@ -136,10 +135,9 @@ class HistoryService:
             end_seq = max_seq
             if query.before_seq is not None:
                 end_seq = min(end_seq, query.before_seq - 1)
-            if end_seq >= min_seq:
-                messages, fetch_performed, history_complete = self._query_descending(
-                    query, min_seq, end_seq, deadline
-                )
+            messages, fetch_performed, history_complete = self._query_descending(
+                query, end_seq, deadline
+            )
 
         channel_ids = {int(message["channel_id"]) for message in messages}
         if query.channel_id is not None:
@@ -170,9 +168,8 @@ class HistoryService:
     def get_payload(self, seq: int, query: PayloadQuery) -> dict[str, Any]:
         deadline = QueryDeadline(self._query_timeout_seconds)
         status = self._call(deadline, self._client.get_status, query.principal, query.token)
-        min_seq = int(status.min_seq)
         max_seq = int(status.max_seq)
-        if seq < min_seq or seq > max_seq:
+        if not 0 <= seq <= max_seq:
             raise MessageNotFound("message not found")
 
         try:
@@ -209,7 +206,7 @@ class HistoryService:
         return result
 
     def _query_descending(
-        self, query: HistoryQuery, min_seq: int, end_seq: int, deadline: QueryDeadline
+        self, query: HistoryQuery, end_seq: int, deadline: QueryDeadline
     ) -> tuple[list[dict[str, Any]], bool, bool]:
         collected: list[dict[str, Any]] = []
         window_end = end_seq
@@ -217,11 +214,11 @@ class HistoryService:
         fetch_performed = False
         history_complete = False
 
-        while window_end >= min_seq and len(collected) < query.limit:
+        while window_end >= 0 and len(collected) < query.limit:
             deadline.remaining()
             remaining = query.limit - len(collected)
             window_size = self._history.fetch_batch_size
-            window_start = max(min_seq, window_end - window_size + 1)
+            window_start = max(0, window_end - window_size + 1)
             window_messages, matched_count = self._fetch_window(
                 query,
                 channels,
@@ -233,7 +230,7 @@ class HistoryService:
             )
             fetch_performed = True
             collected.extend(window_messages)
-            history_complete = window_start == min_seq and matched_count <= remaining
+            history_complete = window_start == 0 and matched_count <= remaining
             window_end = window_start - 1
 
         return collected, fetch_performed, history_complete

@@ -142,7 +142,7 @@ function initList() {
       actions.appendChild(detail);
     }
     summary.appendChild(actions);
-    card.append(summary, renderPayload(message.payload));
+    card.append(summary, renderPayload(message.payload, { collapsed: true }));
     return card;
   }
 }
@@ -175,16 +175,31 @@ async function request(url, body) {
   }
 }
 
-function renderPayload(payload) {
-  const panel = document.createElement("div");
+function renderPayload(payload, { collapsed = false } = {}) {
+  const panel = document.createElement(collapsed ? "details" : "div");
   panel.className = "payload-panel";
-  const title = document.createElement("h2");
+  if (collapsed) panel.open = false;
+  const title = document.createElement(collapsed ? "summary" : "h2");
   title.textContent = "Payload";
   panel.appendChild(title);
-  const metadata = document.createElement("div");
+  const metadata = document.createElement(collapsed ? "span" : "div");
   metadata.className = "payload-meta";
   metadata.textContent = `encoding: ${payload?.encoding || "unknown"} · size: ${payload?.size_bytes ?? 0} bytes`;
-  panel.appendChild(metadata);
+  (collapsed ? title : panel).appendChild(metadata);
+  if (collapsed) {
+    let initialized = false;
+    panel.addEventListener("toggle", () => {
+      if (!panel.open || initialized) return;
+      initialized = true;
+      renderPayloadContent(panel, payload);
+    });
+  } else {
+    renderPayloadContent(panel, payload);
+  }
+  return panel;
+}
+
+function renderPayloadContent(panel, payload) {
   if (payload?.preview) {
     const pre = document.createElement("pre");
     pre.textContent = `omitted: ${payload.preview.omitted_bytes} bytes\n\nHEAD\n${payload.preview.head}\n\nTAIL\n${payload.preview.tail}`;
@@ -223,7 +238,6 @@ function renderPayload(payload) {
     }
     panel.appendChild(pre);
   }
-  return panel;
 }
 
 function renderJsonNode(value, label, initiallyOpen = false) {
