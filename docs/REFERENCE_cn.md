@@ -6,6 +6,9 @@
 [README](../README_cn.md)；上游历史、认证和权限语义见
 [OpenEvent API](../openevent-sdk/docs/API_cn.md)。View 是只读查看工具，通过部署时运行
 View 的 Python 环境中已安装的 `openevent-sdk>=0.11.1` 访问 OpenEvent，不直接读取服务端存储。
+启动时按当前 View 包的依赖声明检查已安装的 SDK；SDK 缺失或版本不满足要求时，报错退出，
+不开始监听。安装版本使用本包安装元数据中的依赖声明；直接运行源码时使用该源码仓库的
+`pyproject.toml`。两种入口都不从 SDK 子模块加载源码。
 
 ## 1. 部署边界
 

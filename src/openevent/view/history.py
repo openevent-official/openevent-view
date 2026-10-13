@@ -111,9 +111,7 @@ class HistoryService:
         self._query_timeout_seconds = query_timeout_seconds
         self._rpc_timeout_seconds = rpc_timeout_seconds
         self._channel_cache_size = channel_cache_size
-        self._channel_cache: OrderedDict[tuple[int, int], ChannelDisplay] = (
-            OrderedDict()
-        )
+        self._channel_cache: OrderedDict[int, ChannelDisplay] = OrderedDict()
         self._channel_cache_lock = threading.Lock()
         self._channel_executor = ThreadPoolExecutor(
             max_workers=channel_lookup_workers,
@@ -324,7 +322,7 @@ class HistoryService:
             deadline.remaining()
             cached = None
             if channel_id != force_channel_id:
-                cached = self._get_cached_channel(principal, channel_id)
+                cached = self._get_cached_channel(channel_id)
             if cached is None:
                 missing.append(channel_id)
             else:
@@ -343,7 +341,7 @@ class HistoryService:
                 except FutureTimeoutError as exc:
                     raise QueryTimeout("history query timed out") from exc
                 displays[channel_id] = display
-                self._cache_channel(principal, display)
+                self._cache_channel(display)
         finally:
             for future in futures.values():
                 future.cancel()
@@ -359,21 +357,17 @@ class HistoryService:
             protocol=str(response.channel.protocol),
         )
 
-    def _get_cached_channel(
-        self, principal: int, channel_id: int
-    ) -> ChannelDisplay | None:
-        key = (principal, channel_id)
+    def _get_cached_channel(self, channel_id: int) -> ChannelDisplay | None:
         with self._channel_cache_lock:
-            display = self._channel_cache.get(key)
+            display = self._channel_cache.get(channel_id)
             if display is not None:
-                self._channel_cache.move_to_end(key)
+                self._channel_cache.move_to_end(channel_id)
             return display
 
-    def _cache_channel(self, principal: int, display: ChannelDisplay) -> None:
-        key = (principal, display.channel_id)
+    def _cache_channel(self, display: ChannelDisplay) -> None:
         with self._channel_cache_lock:
-            self._channel_cache[key] = display
-            self._channel_cache.move_to_end(key)
+            self._channel_cache[display.channel_id] = display
+            self._channel_cache.move_to_end(display.channel_id)
             while len(self._channel_cache) > self._channel_cache_size:
                 self._channel_cache.popitem(last=False)
 

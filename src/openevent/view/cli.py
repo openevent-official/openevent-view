@@ -4,6 +4,7 @@ import argparse
 import logging
 
 from .config import ConfigError, ViewConfig, load_config
+from .dependencies import require_installed_sdk
 from .history import HistoryService
 from .server import create_server
 
@@ -18,12 +19,13 @@ def main(argv: list[str] | None = None) -> int:
 
     logging.basicConfig(level=getattr(logging, args.log_level.upper(), logging.INFO))
 
+    sdk_requirement = require_installed_sdk()
     try:
         from openevent.sdk import OpenEventClient
         from .upstream import HistoryClient
     except ImportError as exc:
         raise SystemExit(
-            "failed to import openevent-sdk; install openevent-sdk>=0.11.1 "
+            f"failed to import openevent-sdk; install {sdk_requirement} "
             "before starting openevent-view"
         ) from exc
 

@@ -133,6 +133,65 @@ class ViewEndToEndTests(unittest.TestCase):
             self.assertEqual(http(view_port, "/static/app.js")[0], 200)
 
             channel = client.create_channel(principal, token, "view-e2e", protocol="test/view").channel
+            member = 1002
+            client.add_member(principal, token, channel.channel_id, member)
+            client.remove_member(principal, token, channel.channel_id, member)
+
+            # This fresh server has no other writers. Channel creation and each
+            # actual membership change commit one ordinary-history system event.
+            system_envelopes = {
+                0: {"kind": "system.initialization", "data": {"schema_version": 1}},
+                1: {
+                    "kind": "system.channel_initialized",
+                    "data": {
+                        "schema_version": 1,
+                        "name": "view-e2e",
+                        "protocol": "test/view",
+                        "description": "",
+                        "visibility": "public",
+                        "creator": principal,
+                        "members": [principal],
+                    },
+                },
+                2: {"kind": "system.member_added", "data": {"schema_version": 1, "member": member}},
+                3: {"kind": "system.member_removed", "data": {"schema_version": 1, "member": member}},
+            }
+            self.assertEqual(client.get_status(principal, token).max_seq, 3)
+            expected_system_messages = {}
+            for seq, envelope in system_envelopes.items():
+                upstream = client.fetch(principal, token, from_seq=seq, limit=1)
+                self.assertEqual(len(upstream.messages), 1)
+                event = upstream.messages[0]
+                channel_id = channel.channel_id if seq else 0
+                self.assertEqual((event.seq, event.channel_id, event.principal), (seq, channel_id, 0))
+                self.assertEqual(list(event.recipients), [])
+                self.assertEqual(list(event.object_keys), [])
+                self.assertEqual(json.loads(event.payload), envelope)
+                if seq:
+                    self.assertGreater(event.uuid, 0)
+                else:
+                    self.assertEqual(event.uuid, 0)
+                # Dynamic UUID/time and exact payload bytes come from the SDK,
+                # independently of the View response whose projection is tested.
+                expected_system_messages[str(seq)] = {
+                    "seq": str(seq),
+                    "uuid": str(event.uuid),
+                    "ts_ms": str(event.ts_ms),
+                    "channel_id": str(channel_id),
+                    "channel_name": "view-e2e" if seq else "system",
+                    "channel_protocol": "test/view" if seq else "system.v1",
+                    "principal": "0",
+                    "recipients": [],
+                    "object_ids": [],
+                    "payload": {
+                        "encoding": "utf-8",
+                        "text": event.payload.decode("utf-8"),
+                        "truncated": False,
+                        "size_bytes": len(event.payload),
+                    },
+                }
+            self.assertEqual(system, expected_system_messages["0"])
+
             payloads = [b'{"kind":"small"}', b"BEGIN|" + b"x" * 32768 + b"|END"]
             published = []
             for payload in payloads:
@@ -143,8 +202,15 @@ class ViewEndToEndTests(unittest.TestCase):
                 published.append((seq, uuid))
 
             complete = post("/v1/messages")
-            expected_seqs = [str(item[0]) for item in reversed(published)] + ["0"]
+            self.assertEqual([item[0] for item in published], [4, 5])
+            expected_seqs = ["5", "4", "3", "2", "1", "0"]
             self.assertEqual([item["seq"] for item in complete["messages"]], expected_seqs)
+            self.assertIsNone(complete["next_cursor"])
+            for item in complete["messages"][2:]:
+                with self.subTest(system_seq=item["seq"]):
+                    expected = expected_system_messages[item["seq"]]
+                    self.assertEqual(item, expected)
+                    self.assertEqual(post(f'/v1/messages/{item["seq"]}/payload')["message"], expected)
             large = complete["messages"][0]
             self.assertEqual(large["uuid"], str(published[-1][1]))
             self.assertTrue(large["payload"]["truncated"])
@@ -160,11 +226,17 @@ class ViewEndToEndTests(unittest.TestCase):
             filtered = post("/v1/messages", channel_id="0")
             self.assertEqual([item["seq"] for item in filtered["messages"]], ["0"])
             self.assertEqual(filtered["channel"]["channel_id"], "0")
+            filtered = post("/v1/messages", channel_id=str(channel.channel_id))
+            self.assertEqual([item["seq"] for item in filtered["messages"]], expected_seqs[:-1])
+            self.assertEqual(filtered["channel"]["channel_protocol"], "test/view")
 
             cursor = None
             pages = []
             for _ in range(len(expected_seqs) + 1):
                 page = post("/v1/messages", cursor=cursor, limit=1)
+                for item in page["messages"]:
+                    if item["seq"] in expected_system_messages:
+                        self.assertEqual(item, expected_system_messages[item["seq"]])
                 pages.extend(item["seq"] for item in page["messages"])
                 cursor = page["next_cursor"]
                 if cursor is None:

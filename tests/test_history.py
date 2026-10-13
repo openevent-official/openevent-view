@@ -133,6 +133,31 @@ class ShortPageClient(FakeClient):
         )
 
 
+class AccessCheckedClient(FakeClient):
+    """Principal 200 cannot read Channel 7; every principal has its own token."""
+
+    def get_status(self, principal, token, *, timeout):
+        result = super().get_status(principal, token, timeout=timeout)
+        if token != f"token-{principal}":
+            raise FakeRpcError(grpc.StatusCode.UNAUTHENTICATED)
+        return result
+
+    def fetch(self, principal, token, *args, **kwargs):
+        result = super().fetch(principal, token, *args, **kwargs)
+        if principal == 200:
+            if 7 in kwargs.get("channels", ()):
+                raise FakeRpcError(grpc.StatusCode.PERMISSION_DENIED)
+            # Filtering can produce a short or empty page; preserve scan progress.
+            result.messages = [item for item in result.messages if item.channel_id != 7]
+        return result
+
+    def get_channel(self, principal, token, channel_id, *, timeout):
+        result = super().get_channel(principal, token, channel_id, timeout=timeout)
+        if principal == 200 and channel_id == 7:
+            raise FakeRpcError(grpc.StatusCode.PERMISSION_DENIED)
+        return result
+
+
 class HistoryTests(unittest.TestCase):
     def setUp(self):
         self.config = HistoryConfig(default_limit=2, max_limit=10, fetch_batch_size=2)
@@ -228,6 +253,94 @@ class HistoryTests(unittest.TestCase):
 
         self.assertEqual(result["channel"]["channel_name"], "channel-7")
         self.assertIn(("channel", 7), client.calls)
+
+    def test_channel_display_cache_is_shared_across_principals_and_detail(self):
+        client = FakeClient([message(1)])
+        service = self.make_service(client)
+        for principal in (100, 200):
+            result = service.query(parse_history_query(
+                {"principal": str(principal), "token": "t", "channel_id": "7"},
+                self.config,
+            ))
+            self.assertEqual(result["messages"][0]["channel_name"], "channel-7")
+        detail = service.get_payload(1, PayloadQuery(300, "t"))
+        self.assertEqual(detail["message"]["channel_name"], "channel-7")
+        self.assertEqual([call for call in client.calls if call[0] == "channel"], [("channel", 7)])
+        self.assertEqual(
+            [call for call in client.calls if call[0] == "status"],
+            [("status", 100, "t"), ("status", 200, "t"), ("status", 300, "t")],
+        )
+        self.assertEqual(len([call for call in client.calls if call[0] == "fetch"]), 3)
+
+    def test_shared_channel_cache_does_not_bypass_authentication(self):
+        client = AccessCheckedClient([message(1)])
+        service = self.make_service(client)
+        service.query(parse_history_query(
+            {"principal": "100", "token": "token-100", "channel_id": "7"}, self.config,
+        ))
+        for cursor in (None, {"before_seq": "0"}):
+            with self.subTest(cursor=cursor):
+                client.calls.clear()
+                with self.assertRaises(FakeRpcError) as error:
+                    service.query(parse_history_query(
+                        {"principal": "200", "token": "invalid", "channel_id": "7", "cursor": cursor},
+                        self.config,
+                    ))
+                self.assertEqual(error.exception.code(), grpc.StatusCode.UNAUTHENTICATED)
+                self.assertEqual(client.calls, [("status", 200, "invalid")])
+        client.calls.clear()
+        with self.assertRaises(FakeRpcError) as error:
+            service.get_payload(1, PayloadQuery(200, "invalid"))
+        self.assertEqual(error.exception.code(), grpc.StatusCode.UNAUTHENTICATED)
+        self.assertEqual(client.calls, [("status", 200, "invalid")])
+
+    def test_shared_channel_cache_does_not_bypass_fetch_permissions(self):
+        client = AccessCheckedClient([message(1)])
+        service = self.make_service(client)
+        service.query(parse_history_query(
+            {"principal": "100", "token": "token-100", "channel_id": "7"}, self.config,
+        ))
+        with self.assertRaises(FakeRpcError) as error:
+            service.query(parse_history_query(
+                {"principal": "200", "token": "token-200", "channel_id": "7"}, self.config,
+            ))
+        self.assertEqual(error.exception.code(), grpc.StatusCode.PERMISSION_DENIED)
+        result = service.query(parse_history_query(
+            {"principal": "200", "token": "token-200"}, self.config,
+        ))
+        self.assertEqual([item["seq"] for item in result["messages"]], ["0"])
+        with self.assertRaises(MessageNotFound):
+            service.get_payload(1, PayloadQuery(200, "token-200"))
+
+    def test_shared_channel_cache_is_bypassed_for_boundary_permission_checks(self):
+        client = AccessCheckedClient([message(1)])
+        service = self.make_service(client)
+        service.query(parse_history_query(
+            {"principal": "100", "token": "token-100", "channel_id": "7"}, self.config,
+        ))
+        client.calls.clear()
+        with self.assertRaises(FakeRpcError) as error:
+            service.query(parse_history_query(
+                {"principal": "200", "token": "token-200", "channel_id": "7", "cursor": {"before_seq": "0"}},
+                self.config,
+            ))
+        self.assertEqual(error.exception.code(), grpc.StatusCode.PERMISSION_DENIED)
+        self.assertEqual(client.calls, [("status", 200, "token-200"), ("channel", 7)])
+
+    def test_shared_channel_cache_keeps_its_lru_limit(self):
+        client = FakeClient([message(1, channel=7), message(2, channel=8), message(3, channel=9)])
+        service = HistoryService(client, self.config, channel_cache_size=2)
+        self.addCleanup(service.close)
+        for principal, channel_id in ((100, 7), (200, 8), (300, 7), (400, 9), (500, 7), (600, 8)):
+            result = service.query(parse_history_query(
+                {"principal": str(principal), "token": "t", "channel_id": str(channel_id)},
+                self.config,
+            ))
+            self.assertEqual(result["channel"]["channel_name"], f"channel-{channel_id}")
+        self.assertEqual(
+            [call for call in client.calls if call[0] == "channel"],
+            [("channel", 7), ("channel", 8), ("channel", 9), ("channel", 8)],
+        )
 
     def test_message_projection_hides_object_tokens(self):
         client = FakeClient([message(1)])

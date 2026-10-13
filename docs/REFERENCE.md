@@ -8,6 +8,10 @@ startup, and the [OpenEvent API](../openevent-sdk/docs/API.md) for upstream hist
 authentication, and permission semantics. View is a read-only tool that uses
 `openevent-sdk>=0.11.1` installed in the Python environment running the deployment;
 it does not read server storage directly.
+Startup checks the installed SDK against the current View package's dependency
+declaration. A missing or incompatible SDK causes an error before the HTTP listener
+starts. Installed View uses its package metadata; running from source uses that
+checkout's `pyproject.toml`. Neither entry point loads SDK source from the submodule.
 
 ## 1. Deployment Boundary
 
