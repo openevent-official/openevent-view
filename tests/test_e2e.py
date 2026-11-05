@@ -76,7 +76,7 @@ class ViewEndToEndTests(unittest.TestCase):
         from openevent.sdk import AdminClient, OpenEventClient
         from openevent.view import cli
 
-        self.assertGreaterEqual(Version(importlib.metadata.version("openevent-sdk")), Version("0.11.1"))
+        self.assertGreaterEqual(Version(importlib.metadata.version("openevent-sdk")), Version("0.13.0"))
         # The test runner and CLI must load this run's installed View wheel.
         installed_view = Path(os.environ["OPENEVENT_VIEW_E2E_SITE"]).resolve()
         self.assertTrue(Path(cli.__file__).resolve().is_relative_to(installed_view))

@@ -6,7 +6,7 @@ This document is the authoritative reference for View configuration, HTTP APIs,
 and deployment boundaries. See the [README](../README.md) for installation and
 startup, and the [OpenEvent API](../openevent-sdk/docs/API.md) for upstream history,
 authentication, and permission semantics. View is a read-only tool that uses
-`openevent-sdk>=0.11.1` installed in the Python environment running the deployment;
+`openevent-sdk>=0.13.0` installed in the Python environment running the deployment;
 it does not read server storage directly.
 Startup checks the installed SDK against the current View package's dependency
 declaration. A missing or incompatible SDK causes an error before the HTTP listener
