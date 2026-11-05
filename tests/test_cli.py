@@ -4,7 +4,6 @@ import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
-from openevent.sdk import OpenEventClient
 from openevent.view.cli import main
 from openevent.view import dependencies
 from openevent.view.upstream import HistoryClient
@@ -28,36 +27,27 @@ class CliTests(unittest.TestCase):
                 client.assert_not_called()
                 server.assert_not_called()
 
-    def test_startup_uses_installed_sdk_and_closes_it(self):
-        instances = []
-
-        class ObservedClient(OpenEventClient):
-            def __init__(self, *args, **kwargs):
-                super().__init__(*args, **kwargs)
-                instances.append(self)
-
+    def test_startup_configures_sdk_and_closes_it(self):
         server = Mock()
         server.serve_forever.side_effect = KeyboardInterrupt
-        with patch("openevent.sdk.OpenEventClient", ObservedClient):
-            with patch("openevent.view.cli.create_server", return_value=server):
-                self.assertEqual(main([]), 0)
-        self.assertEqual(instances[0].timeout_ms, 10000)
-        self.assertTrue(instances[0]._closed)
+        with (
+            patch("openevent.sdk.OpenEventClient", autospec=True) as client,
+            patch("openevent.view.cli.create_server", return_value=server),
+        ):
+            self.assertEqual(main([]), 0)
+        client.assert_called_once_with("127.0.0.1:9527", timeout_ms=10000)
+        client.return_value.close.assert_called_once_with()
         server.server_close.assert_called_once()
 
     def test_sdk_is_closed_if_http_listener_cannot_start(self):
-        instances = []
-
-        class ObservedClient(OpenEventClient):
-            def __init__(self, *args, **kwargs):
-                super().__init__(*args, **kwargs)
-                instances.append(self)
-
-        with patch("openevent.sdk.OpenEventClient", ObservedClient):
-            with patch("openevent.view.cli.create_server", side_effect=OSError("bind failed")):
-                with self.assertRaises(OSError):
-                    main([])
-        self.assertTrue(instances[0]._closed)
+        with (
+            patch("openevent.sdk.OpenEventClient", autospec=True) as client,
+            patch("openevent.view.cli.create_server", side_effect=OSError("bind failed")),
+            self.assertRaises(OSError),
+        ):
+            main([])
+        client.assert_called_once_with("127.0.0.1:9527", timeout_ms=10000)
+        client.return_value.close.assert_called_once_with()
 
     def test_generated_sdk_requests_keep_filters_and_individual_deadlines(self):
         sdk = Mock()

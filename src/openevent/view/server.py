@@ -16,7 +16,6 @@ from .history import (
     MessageNotFound,
     QueryTimeout,
     RequestError,
-    UpstreamProtocolError,
     parse_history_query,
     parse_payload_query,
     parse_seq,
@@ -149,8 +148,6 @@ def make_handler() -> type[BaseHTTPRequestHandler]:
                 self._send_error_json(400, exc.code, str(exc))
             elif isinstance(exc, MessageNotFound):
                 self._send_error_json(404, exc.code, str(exc))
-            elif isinstance(exc, UpstreamProtocolError):
-                self._send_error_json(502, exc.code, str(exc))
             elif isinstance(exc, grpc.RpcError):
                 status, code = _grpc_to_http(exc)
                 self._send_error_json(status, code, exc.details() or code)

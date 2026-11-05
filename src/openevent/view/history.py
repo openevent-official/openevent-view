@@ -25,10 +25,6 @@ class RequestError(ValueError):
     code = "INVALID_ARGUMENT"
 
 
-class UpstreamProtocolError(RuntimeError):
-    code = "BAD_GATEWAY"
-
-
 class MessageNotFound(LookupError):
     code = "NOT_FOUND"
 
@@ -176,8 +172,6 @@ class HistoryService:
                 query.principal, query.token, from_seq=seq, limit=1,
                 only_my_recipient=False, channels=(),
             )
-            if int(response.next_seq) <= seq:
-                raise UpstreamProtocolError("OpenEvent Fetch next_seq did not advance")
             for message in response.messages:
                 if int(message.seq) == seq:
                     displays = self._load_channel_displays(
@@ -257,21 +251,18 @@ class HistoryService:
                 channels=channels,
             )
             next_seq = int(response.next_seq)
-            if next_seq <= fetch_from:
-                raise UpstreamProtocolError("OpenEvent Fetch next_seq did not advance")
             candidates = [
                 message for message in response.messages
                 if window_start <= int(message.seq) <= window_end
             ]
             matched_count += len(candidates)
-            candidates.sort(key=lambda message: int(message.seq), reverse=True)
-            # Older entries in this response cannot make the page. Select before
-            # decoding payloads, while still scanning every response in the window.
-            for message in candidates[:candidate_limit]:
+            # Fetch is ascending, and later batches are newer. Select before
+            # decoding payloads, then prepend this batch without sorting again.
+            newest = []
+            for message in reversed(candidates[-candidate_limit:]):
                 deadline.remaining()
-                messages.append(self._message_to_dict(message, full_payload=False))
-            messages.sort(key=lambda message: int(message["seq"]), reverse=True)
-            del messages[candidate_limit:]
+                newest.append(self._message_to_dict(message, full_payload=False))
+            messages = newest + messages[:candidate_limit - len(newest)]
             # Keep only the projections; release the RPC payload before the next Fetch.
             message = None
             del candidates

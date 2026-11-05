@@ -65,7 +65,7 @@ history:
 | Field | Meaning and range |
 | --- | --- |
 | `version` | Must be `v1` |
-| `server.host` | Nonempty HTTP listen address |
+| `server.host` | Nonempty IPv4 address or hostname resolving to IPv4 for HTTP listening; IPv6 is not supported |
 | `server.port` | HTTP port, integer `1..65535` |
 | `server.request_timeout_seconds` | HTTP socket read/write timeout, finite positive number of seconds |
 | `server.query_timeout_seconds` | Total history/detail query budget, finite positive number of seconds; covers authentication, Fetch, scanning, message projection, and Channel calls and queueing |
@@ -123,7 +123,10 @@ payload as soon as the message is received, without requiring an initial expansi
 Successful parsing of complete UTF-8 text shows a JSON tree by default,
 with a switch to the original text; failures show the original text directly.
 JSON objects and arrays expand on demand, showing 100 direct children per batch
-and a Show more control for the rest. The tree follows JavaScript number rules
+and a Show more control for the rest. Before an object's first expansion, its
+summary shows `{…}`; expanding it reveals the exact field count, which remains
+visible after collapsing it again. Arrays always show their element count.
+The tree follows JavaScript number rules
 and may not preserve large integers exactly; use the original text to verify content.
 Large payloads show a list preview when expanded and open complete content in a new tab.
 External fields and errors are rendered as text or JSON nodes, never HTML or scripts.
@@ -303,6 +306,5 @@ Request body read timeouts still return the error below.
 | Upstream unavailable | `503` | `UNAVAILABLE` |
 | Individual upstream RPC timeout | `504` | `DEADLINE_EXCEEDED` |
 | Total query budget expired | `504` | `QUERY_TIMEOUT` |
-| Fetch cursor does not advance | `502` | `BAD_GATEWAY` |
 | Other gRPC error | `502` | Corresponding gRPC code, or `BAD_GATEWAY` without a code |
 | View internal error | `500` | `INTERNAL` |

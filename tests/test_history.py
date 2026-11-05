@@ -15,7 +15,6 @@ from openevent.view.history import (
     PayloadQuery,
     QueryTimeout,
     RequestError,
-    UpstreamProtocolError,
     encode_payload,
     parse_history_query,
     parse_payload_query,
@@ -364,14 +363,19 @@ class HistoryTests(unittest.TestCase):
         self.assertFalse(result["message"]["payload"]["truncated"])
         self.assertEqual(result["message"]["object_ids"], ["902"])
 
-    def test_payload_lookup_hides_permission_denied_as_not_found(self):
+    def test_payload_lookup_hides_channel_permission_lost_after_fetch(self):
         class DeniedClient(FakeClient):
-            def fetch(self, *args, **kwargs):
+            def get_channel(self, *args, **kwargs):
+                super().get_channel(*args, **kwargs)
                 raise FakeRpcError(grpc.StatusCode.PERMISSION_DENIED)
 
-        service = self.make_service(DeniedClient([message(2)], max_seq=2))
+        client = DeniedClient([message(2)], max_seq=2)
+        service = self.make_service(client)
         with self.assertRaises(MessageNotFound):
             service.get_payload(2, PayloadQuery(principal=100, token="t"))
+        self.assertEqual(client.calls, [
+            ("status", 100, "t"), ("fetch", 2, 1, False, ()), ("channel", 7),
+        ])
 
     def test_large_payload_preview_preserves_byte_boundaries(self):
         text_payload = b"a" * 8191 + "€".encode("utf-8") + b"b" * 9000
@@ -572,21 +576,6 @@ class HistoryTests(unittest.TestCase):
             release.set()
             service.close()
         self.assertFalse(any(call[0] == "channel" for call in client.calls))
-
-    def test_fetch_progress_is_required(self):
-        class BadClient(FakeClient):
-            def fetch(self, *args, **kwargs):
-                return types.SimpleNamespace(
-                    messages=[],
-                    next_seq=kwargs["from_seq"],
-                    last_seq=self.max_seq,
-                )
-
-        service = self.make_service(BadClient([message(1), message(2), message(3)]))
-        with self.assertRaises(UpstreamProtocolError):
-            service.query(
-                parse_history_query({"principal": "100", "token": "t"}, self.config)
-            )
 
 
 if __name__ == "__main__":

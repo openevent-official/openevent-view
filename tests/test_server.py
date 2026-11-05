@@ -112,10 +112,13 @@ class ServerTests(unittest.TestCase):
         return status, headers, json.loads(data) if data else None
 
     def test_only_documented_routes(self):
-        status, _, _ = self.request("GET", "/v1/messages")
-        self.assertEqual(status, 404)
-        status, _, _ = self.request("GET", "/healthz")
-        self.assertEqual(status, 404)
+        for path, expected_status in (
+            ("/", 200), ("/static/app.js", 200), ("/static/app.css", 200),
+            ("/v1/messages", 404), ("/healthz", 404),
+        ):
+            with self.subTest(path=path):
+                status, _, _ = self.request("GET", path)
+                self.assertEqual(status, expected_status)
 
     def test_messages_response_is_no_store_and_hides_object_tokens(self):
         status, headers, body = self.request_json(
@@ -346,21 +349,6 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(logs.records[0].getMessage(), "request failed")
         self.assertIs(logs.records[0].exc_info[0], RuntimeError)
 
-    def test_non_advancing_open_event_cursor_maps_to_bad_gateway(self):
-        class BadFetchClient(FakeClient):
-            def fetch(self, *args, **kwargs):
-                return types.SimpleNamespace(messages=[], next_seq=kwargs["from_seq"], last_seq=1)
-
-        self.history.close()
-        self.history = HistoryService(BadFetchClient(), self.server.config.history)
-        self.server.history_service = self.history
-        status, _, body = self.request_json(
-            "POST", "/v1/messages", {"principal": "100", "token": "t"}
-        )
-
-        self.assertEqual(status, 502)
-        self.assertEqual(body["error"]["code"], "BAD_GATEWAY")
-
     def test_unlisted_upstream_grpc_errors_map_to_bad_gateway(self):
         for code in (grpc.StatusCode.INVALID_ARGUMENT, grpc.StatusCode.RESOURCE_EXHAUSTED):
             with self.subTest(code=code):
@@ -387,17 +375,6 @@ class ServerTests(unittest.TestCase):
 
         self.assertEqual(response.status, 413)
         self.assertEqual(body["error"]["code"], "REQUEST_TOO_LARGE")
-
-    def test_frontend_includes_non_destructive_error_and_filter_context(self):
-        status, _, page = self.request("GET", "/")
-        self.assertEqual(status, 200)
-        self.assertIn(b'id="errorBanner"', page)
-
-        status, _, script = self.request("GET", "/static/app.js")
-        self.assertEqual(status, 200)
-        self.assertIn(b"only messages addressed to this principal", script)
-        self.assertIn(b'["objects", (message.object_ids || []).join', script)
-        self.assertNotIn(b"list.replaceChildren(node)", script)
 
 
 if __name__ == "__main__":

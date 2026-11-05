@@ -55,7 +55,7 @@ history:
 | 字段 | 说明与范围 |
 | --- | --- |
 | `version` | 必须为 `v1` |
-| `server.host` | 非空的 HTTP 监听地址 |
+| `server.host` | 非空的 HTTP 监听 IPv4 地址，或可解析到 IPv4 的主机名；不支持 IPv6 |
 | `server.port` | HTTP 端口，整数 `1..65535` |
 | `server.request_timeout_seconds` | HTTP socket 读写超时，有限正数，单位为秒 |
 | `server.query_timeout_seconds` | 一次历史或详情查询的总预算，有限正数，单位为秒；涵盖认证、Fetch、扫描、消息投影以及 Channel 查询和排队 |
@@ -99,7 +99,8 @@ HTTP socket 超时、单次 RPC 超时和整次查询预算是三个不同限制
 已有内容，不重复解析。详情页取得消息后直接显示完整 payload，无需先展开。
 完整 UTF-8 文本解析成功时默认显示 JSON 树，可切换查看原文，失败时
 直接显示原文。JSON 的对象、数组按需展开，每批显示 100 个直接子项，其余通过“显示更多”
-继续查看。JSON 树遵循 JavaScript 数字规则，可能无法精确表示大整数，核对内容以原文为准。
+继续查看。对象首次展开前的摘要显示 `{…}`，展开后显示准确字段数，再次折叠时保留该数量；
+数组始终显示元素数量。JSON 树遵循 JavaScript 数字规则，可能无法精确表示大整数，核对内容以原文为准。
 大 payload 在列表中展开后显示预览，通过新标签查看完整内容。外部字段和错误信息只作为文本
 或 JSON 节点展示，不作为 HTML 或脚本执行。
 
@@ -257,6 +258,5 @@ limit 校验错误中的上限使用当前配置的 `history.max_limit`。
 | 上游不可用 | `503` | `UNAVAILABLE` |
 | 单次上游 RPC 超时 | `504` | `DEADLINE_EXCEEDED` |
 | 整次查询预算耗尽 | `504` | `QUERY_TIMEOUT` |
-| Fetch 游标不前进 | `502` | `BAD_GATEWAY` |
 | 其他 gRPC 错误 | `502` | 对应 gRPC code，无 code 时为 `BAD_GATEWAY` |
 | View 内部错误 | `500` | `INTERNAL` |

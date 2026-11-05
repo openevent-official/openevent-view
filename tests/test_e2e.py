@@ -137,52 +137,33 @@ class ViewEndToEndTests(unittest.TestCase):
             client.add_member(principal, token, channel.channel_id, member)
             client.remove_member(principal, token, channel.channel_id, member)
 
-            # This fresh server has no other writers. Channel creation and each
-            # actual membership change commit one ordinary-history system event.
-            system_envelopes = {
-                0: {"kind": "system.initialization", "data": {"schema_version": 1}},
-                1: {
-                    "kind": "system.channel_initialized",
-                    "data": {
-                        "schema_version": 1,
-                        "name": "view-e2e",
-                        "protocol": "test/view",
-                        "description": "",
-                        "visibility": "public",
-                        "creator": principal,
-                        "members": [principal],
-                    },
-                },
-                2: {"kind": "system.member_added", "data": {"schema_version": 1, "member": member}},
-                3: {"kind": "system.member_removed", "data": {"schema_version": 1, "member": member}},
+            # Use actual upstream messages as the independent projection baseline;
+            # View does not interpret or validate their system payload schema.
+            system_messages = []
+            from_seq = 0
+            while True:
+                upstream = client.fetch(principal, token, from_seq=from_seq, limit=1000)
+                system_messages.extend(upstream.messages)
+                if upstream.next_seq > upstream.last_seq:
+                    break
+                from_seq = upstream.next_seq
+            channels = {
+                channel_id: client.get_channel(principal, token, channel_id).channel
+                for channel_id in {event.channel_id for event in system_messages}
             }
-            self.assertEqual(client.get_status(principal, token).max_seq, 3)
             expected_system_messages = {}
-            for seq, envelope in system_envelopes.items():
-                upstream = client.fetch(principal, token, from_seq=seq, limit=1)
-                self.assertEqual(len(upstream.messages), 1)
-                event = upstream.messages[0]
-                channel_id = channel.channel_id if seq else 0
-                self.assertEqual((event.seq, event.channel_id, event.principal), (seq, channel_id, 0))
-                self.assertEqual(list(event.recipients), [])
-                self.assertEqual(list(event.object_keys), [])
-                self.assertEqual(json.loads(event.payload), envelope)
-                if seq:
-                    self.assertGreater(event.uuid, 0)
-                else:
-                    self.assertEqual(event.uuid, 0)
-                # Dynamic UUID/time and exact payload bytes come from the SDK,
-                # independently of the View response whose projection is tested.
-                expected_system_messages[str(seq)] = {
-                    "seq": str(seq),
+            for event in system_messages:
+                display = channels[event.channel_id]
+                expected_system_messages[str(event.seq)] = {
+                    "seq": str(event.seq),
                     "uuid": str(event.uuid),
                     "ts_ms": str(event.ts_ms),
-                    "channel_id": str(channel_id),
-                    "channel_name": "view-e2e" if seq else "system",
-                    "channel_protocol": "test/view" if seq else "system.v1",
-                    "principal": "0",
-                    "recipients": [],
-                    "object_ids": [],
+                    "channel_id": str(event.channel_id),
+                    "channel_name": display.name,
+                    "channel_protocol": display.protocol,
+                    "principal": str(event.principal),
+                    "recipients": [str(recipient) for recipient in event.recipients],
+                    "object_ids": [str(key.object_id) for key in event.object_keys],
                     "payload": {
                         "encoding": "utf-8",
                         "text": event.payload.decode("utf-8"),
@@ -202,8 +183,10 @@ class ViewEndToEndTests(unittest.TestCase):
                 published.append((seq, uuid))
 
             complete = post("/v1/messages")
-            self.assertEqual([item[0] for item in published], [4, 5])
-            expected_seqs = ["5", "4", "3", "2", "1", "0"]
+            expected_seqs = [str(seq) for seq in sorted(
+                [event.seq for event in system_messages] + [seq for seq, _ in published],
+                reverse=True,
+            )]
             self.assertEqual([item["seq"] for item in complete["messages"]], expected_seqs)
             self.assertIsNone(complete["next_cursor"])
             for item in complete["messages"][2:]:
@@ -227,7 +210,10 @@ class ViewEndToEndTests(unittest.TestCase):
             self.assertEqual([item["seq"] for item in filtered["messages"]], ["0"])
             self.assertEqual(filtered["channel"]["channel_id"], "0")
             filtered = post("/v1/messages", channel_id=str(channel.channel_id))
-            self.assertEqual([item["seq"] for item in filtered["messages"]], expected_seqs[:-1])
+            channel_seqs = {str(event.seq) for event in system_messages if event.channel_id == channel.channel_id}
+            channel_seqs.update(str(seq) for seq, _ in published)
+            self.assertEqual([item["seq"] for item in filtered["messages"]],
+                             [seq for seq in expected_seqs if seq in channel_seqs])
             self.assertEqual(filtered["channel"]["channel_protocol"], "test/view")
 
             cursor = None

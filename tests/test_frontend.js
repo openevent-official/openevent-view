@@ -348,16 +348,73 @@ test("a large array creates only its first batch, and nested branches load on ex
   assert.equal(branch.children.length, 102, "reopening keeps the rendered batch");
 });
 
-test("object batches eventually expose every field without duplicating or omitting entries", async () => {
+test("object branches enumerate on first expansion and render complete batches once", async () => {
+  for (const initiallyOpen of [false, true]) {
+    const app = createApp();
+    const enumerations = Array(101).fill(0);
+    const values = enumerations.map((_, branchIndex) => new Proxy(
+      Object.fromEntries(Array.from({ length: 205 }, (_, index) => [`key${index}`, index])),
+      { ownKeys(target) {
+        enumerations[branchIndex] += 1;
+        return Reflect.ownKeys(target);
+      } },
+    ));
+    const root = app.context.renderJsonNode(values, "payload", true);
+    assert.equal(root.children[0].textContent, "payload [101]");
+    assert.equal(root.children.length, 102, "only the first batch of branches is created");
+    assert.ok(enumerations.every((count) => count === 0), "folded branches do not enumerate fields");
+    const branch = initiallyOpen
+      ? app.context.renderJsonNode(values[0], "0", true)
+      : root.children[1];
+    if (!initiallyOpen) {
+      assert.equal(branch.children[0].textContent, "0 {…}");
+      assert.equal(branch.children.length, 1);
+      branch.open = true;
+      await branch.fire("toggle");
+    }
+    assert.equal(branch.children[0].textContent, "0 {205}");
+    assert.equal(branch.children.length, 102);
+    await branch.children.at(-1).fire("click");
+    await branch.children.at(-1).fire("click");
+    assert.deepEqual(branch.children.slice(1).map((node) => node.textContent),
+      Array.from({ length: 205 }, (_, index) => `key${index}: ${index}`));
+    assert.equal(branch.children.at(-1).tagName, "div");
+    const children = [...branch.children];
+    branch.open = false;
+    await branch.fire("toggle");
+    branch.open = true;
+    await branch.fire("toggle");
+    children.forEach((node, index) => assert.equal(branch.children[index], node));
+    assert.equal(enumerations[0], 1, "more batches and reopening reuse the enumerated fields");
+    assert.ok(enumerations.slice(1).every((count) => count === 0));
+
+    await root.children.at(-1).fire("click");
+    const lastBranch = root.children.at(-1);
+    assert.equal(lastBranch.children[0].textContent, "100 {…}");
+    assert.equal(enumerations[100], 0, "later batches also leave folded objects untouched");
+  }
+});
+
+test("an empty object reveals its zero field count only on first expansion", async () => {
   const app = createApp();
-  const value = Object.fromEntries(Array.from({ length: 205 }, (_, index) => [`key${index}`, index]));
-  const root = app.context.renderJsonNode(value, "payload", true);
-  await root.children.at(-1).fire("click");
-  await root.children.at(-1).fire("click");
-  assert.equal(root.children.length, 206);
-  assert.deepEqual(root.children.slice(1).map((node) => node.textContent),
-    Object.entries(value).map(([key, item]) => `${key}: ${item}`));
-  assert.equal(root.children.at(-1).tagName, "div");
+  let enumerations = 0;
+  const value = new Proxy({}, { ownKeys(target) {
+    enumerations += 1;
+    return Reflect.ownKeys(target);
+  } });
+  const root = app.context.renderJsonNode(value, "payload");
+  assert.equal(enumerations, 0);
+  assert.equal(root.children[0].textContent, "payload {…}");
+  root.open = true;
+  await root.fire("toggle");
+  assert.equal(enumerations, 1);
+  assert.equal(root.children[0].textContent, "payload {0}");
+  assert.equal(root.children.length, 1, "empty objects do not add a more button");
+  root.open = false;
+  await root.fire("toggle");
+  root.open = true;
+  await root.fire("toggle");
+  assert.equal(enumerations, 1);
 });
 
 test("list and detail show the same metadata including seq zero", async () => {
@@ -372,6 +429,7 @@ test("list and detail show the same metadata including seq zero", async () => {
     .map((node) => node.children.map((child) => child.textContent));
   assert.deepEqual(fields(listMeta), fields(detailMeta));
   assert.deepEqual(fields(detailMeta)[0], ["seq", "0"]);
+  assert.deepEqual(fields(detailMeta).find(([name]) => name === "objects"), ["objects", "3"]);
 });
 
 test("pagination uses applied inputs through next, previous, and latest until Query succeeds", async () => {
@@ -380,9 +438,15 @@ test("pagination uses applied inputs through next, previous, and latest until Qu
   app.setFetch(async (_, options) => {
     const query = JSON.parse(options.body);
     queries.push(query);
-    return response(query.cursor
+    const page = query.cursor
       ? { messages: [message], next_cursor: null }
-      : { messages: [{ ...message, seq: "10" }], next_cursor: { before_seq: "10" } });
+      : { messages: [{ ...message, seq: "10" }], next_cursor: { before_seq: "10" } };
+    if (query.channel_id !== undefined) {
+      page.channel = {
+        channel_id: query.channel_id, channel_name: `channel-${query.channel_id}`, channel_protocol: "test",
+      };
+    }
+    return response(page);
   });
   for (const id of ["nextButton", "previousButton", "latestButton"]) {
     assert.equal(app.ids.get(id).disabled, true);
@@ -395,6 +459,8 @@ test("pagination uses applied inputs through next, previous, and latest until Qu
   app.ids.get("recipientInput").checked = true;
   await app.ids.get("queryForm").fire("submit");
   await settled();
+  assert.equal(app.ids.get("resultTitle").textContent, "History for 2 · channel-0 (0, test)");
+  assert.match(app.ids.get("resultMeta").textContent, /only messages addressed to this principal/);
   app.ids.get("principalInput").value = "3";
   app.ids.get("tokenInput").value = "edited-token";
   app.ids.get("channelInput").value = "7";
@@ -422,10 +488,14 @@ test("pagination uses applied inputs through next, previous, and latest until Qu
     assert.equal(query.channel_id, "0");
     assert.equal(query.only_my_recipient, true);
   }
+  assert.equal(app.ids.get("resultTitle").textContent, "History for 2 · channel-0 (0, test)");
+  assert.match(app.ids.get("resultMeta").textContent, /only messages addressed to this principal/);
   await app.ids.get("queryForm").fire("submit");
   await settled();
   assert.deepEqual(queries.at(-1), { principal: "3", token: "edited-token", channel_id: "7", cursor: null });
   assert.equal(app.ids.get("previousButton").disabled, true);
+  assert.equal(app.ids.get("resultTitle").textContent, "History for 3 · channel-7 (7, test)");
+  assert.match(app.ids.get("resultMeta").textContent, /all visible messages/);
 });
 
 test("every payload shows its encoding and original byte count", () => {

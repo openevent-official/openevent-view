@@ -243,12 +243,12 @@ function renderPayloadContent(panel, payload) {
 function renderJsonNode(value, label, initiallyOpen = false) {
   if (value && typeof value === "object") {
     const isArray = Array.isArray(value);
-    const keys = isArray ? null : Object.keys(value);
-    const size = isArray ? value.length : keys.length;
+    let keys = null;
+    let size = isArray ? value.length : null;
     const details = document.createElement("details");
     details.open = initiallyOpen;
     const summary = document.createElement("summary");
-    summary.textContent = `${label} ${isArray ? `[${size}]` : `{${size}}`}`;
+    summary.textContent = `${label} ${isArray ? `[${size}]` : "{…}"}`;
     details.appendChild(summary);
     let rendered = 0;
     let initialized = false;
@@ -275,6 +275,11 @@ function renderJsonNode(value, label, initiallyOpen = false) {
 
     function expand() {
       if (!details.open || initialized) return;
+      if (!isArray) {
+        keys = Object.keys(value);
+        size = keys.length;
+        summary.textContent = `${label} {${size}}`;
+      }
       initialized = true;
       appendBatch();
     }
