@@ -67,13 +67,15 @@ def make_handler() -> type[BaseHTTPRequestHandler]:
             parsed = urlparse(self.path)
             try:
                 if parsed.path == "/":
-                    self._send_html(_load_static_text("index.html"))
+                    self._send_bytes(
+                        _load_static_bytes("index.html"), "text/html; charset=utf-8"
+                    )
                 elif parsed.path == "/static/app.css":
-                    self._send_static(
+                    self._send_bytes(
                         _load_static_bytes("app.css"), "text/css; charset=utf-8"
                     )
                 elif parsed.path == "/static/app.js":
-                    self._send_static(
+                    self._send_bytes(
                         _load_static_bytes("app.js"),
                         "application/javascript; charset=utf-8",
                     )
@@ -82,7 +84,9 @@ def make_handler() -> type[BaseHTTPRequestHandler]:
                     if set(values) != {"seq"} or len(values["seq"]) != 1:
                         raise RequestError("seq must be a canonical uint64 decimal string")
                     parse_seq(values["seq"][0])
-                    self._send_html(_load_static_text("message.html"))
+                    self._send_bytes(
+                        _load_static_bytes("message.html"), "text/html; charset=utf-8"
+                    )
                 else:
                     raise JsonResponseError(404, "NOT_FOUND", "not found")
             except Exception as exc:
@@ -155,12 +159,6 @@ def make_handler() -> type[BaseHTTPRequestHandler]:
                 LOGGER.exception("request failed")
                 self._send_error_json(500, "INTERNAL", "internal server error")
 
-        def _send_html(self, body: str) -> None:
-            self._send_bytes(body.encode("utf-8"), "text/html; charset=utf-8")
-
-        def _send_static(self, body: bytes, content_type: str) -> None:
-            self._send_bytes(body, content_type)
-
         def _send_bytes(self, body: bytes, content_type: str, status: int = 200) -> None:
             self._response_started = True
             self.send_response(status)
@@ -200,12 +198,6 @@ def _grpc_to_http(exc: grpc.RpcError) -> tuple[int, str]:
         grpc.StatusCode.DEADLINE_EXCEEDED: (504, "DEADLINE_EXCEEDED"),
     }
     return mapping.get(code, (502, code.name if code is not None else "BAD_GATEWAY"))
-
-
-def _load_static_text(name: str) -> str:
-    return resources.files("openevent.view.static").joinpath(name).read_text(
-        encoding="utf-8"
-    )
 
 
 def _load_static_bytes(name: str) -> bytes:

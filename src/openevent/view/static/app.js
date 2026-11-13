@@ -142,7 +142,7 @@ function initList() {
       actions.appendChild(detail);
     }
     summary.appendChild(actions);
-    card.append(summary, renderPayload(message.payload, { collapsed: true }));
+    card.append(summary, renderPayload(message.payload, { collapsible: true }));
     return card;
   }
 }
@@ -175,24 +175,26 @@ async function request(url, body) {
   }
 }
 
-function renderPayload(payload, { collapsed = false } = {}) {
-  const panel = document.createElement(collapsed ? "details" : "div");
+function renderPayload(payload, { collapsible = false } = {}) {
+  const panel = document.createElement(collapsible ? "details" : "div");
   panel.className = "payload-panel";
-  if (collapsed) panel.open = false;
-  const title = document.createElement(collapsed ? "summary" : "h2");
+  if (collapsible) panel.open = !payload?.truncated;
+  const title = document.createElement(collapsible ? "summary" : "h2");
   title.textContent = "Payload";
   panel.appendChild(title);
-  const metadata = document.createElement(collapsed ? "span" : "div");
+  const metadata = document.createElement(collapsible ? "span" : "div");
   metadata.className = "payload-meta";
   metadata.textContent = `encoding: ${payload?.encoding || "unknown"} · size: ${payload?.size_bytes ?? 0} bytes`;
-  (collapsed ? title : panel).appendChild(metadata);
-  if (collapsed) {
+  (collapsible ? title : panel).appendChild(metadata);
+  if (collapsible) {
     let initialized = false;
-    panel.addEventListener("toggle", () => {
+    function expand() {
       if (!panel.open || initialized) return;
       initialized = true;
       renderPayloadContent(panel, payload);
-    });
+    }
+    panel.addEventListener("toggle", expand);
+    expand();
   } else {
     renderPayloadContent(panel, payload);
   }
@@ -207,90 +209,33 @@ function renderPayloadContent(panel, payload) {
   } else {
     const text = payload?.text ?? "";
     const pre = document.createElement("pre");
-    let parsed;
-    let isJson = false;
+    let formatted;
     if (payload?.encoding === "utf-8") {
       try {
-        parsed = JSON.parse(text);
-        isJson = true;
+        formatted = JSON.stringify(JSON.parse(text), null, 2);
       } catch (_) {
-        // Payload text is also valid when it is not JSON.
+        // Keep the original text if parsing or formatting is unavailable.
       }
     }
-    if (isJson) {
-      const tree = document.createElement("div");
-      tree.className = "json-tree";
-      tree.appendChild(renderJsonNode(parsed, "payload", true));
+    if (formatted !== undefined) {
+      pre.className = "json-text";
+      pre.textContent = formatted;
       const toggle = document.createElement("button");
       toggle.type = "button";
       toggle.className = "payload-toggle";
       toggle.textContent = "View original text";
-      pre.hidden = true;
+      let original = false;
       toggle.addEventListener("click", () => {
-        pre.hidden = !pre.hidden;
-        tree.hidden = !pre.hidden;
-        if (!pre.hidden) pre.textContent = text;
-        toggle.textContent = pre.hidden ? "View original text" : "View JSON";
+        original = !original;
+        pre.textContent = original ? text : formatted;
+        toggle.textContent = original ? "View JSON" : "View original text";
       });
-      panel.append(toggle, tree);
+      panel.appendChild(toggle);
     } else {
       pre.textContent = text;
     }
     panel.appendChild(pre);
   }
-}
-
-function renderJsonNode(value, label, initiallyOpen = false) {
-  if (value && typeof value === "object") {
-    const isArray = Array.isArray(value);
-    let keys = null;
-    let size = isArray ? value.length : null;
-    const details = document.createElement("details");
-    details.open = initiallyOpen;
-    const summary = document.createElement("summary");
-    summary.textContent = `${label} ${isArray ? `[${size}]` : "{…}"}`;
-    details.appendChild(summary);
-    let rendered = 0;
-    let initialized = false;
-    let more = null;
-
-    function appendBatch() {
-      if (more) more.remove();
-      const end = Math.min(rendered + 100, size);
-      for (; rendered < end; rendered += 1) {
-        const key = isArray ? rendered : keys[rendered];
-        details.appendChild(renderJsonNode(value[key], key));
-      }
-      if (rendered < size) {
-        if (!more) {
-          more = document.createElement("button");
-          more.type = "button";
-          more.className = "json-more";
-          more.addEventListener("click", appendBatch);
-        }
-        more.textContent = `Show ${Math.min(100, size - rendered)} more (${size - rendered} remaining)`;
-        details.appendChild(more);
-      }
-    }
-
-    function expand() {
-      if (!details.open || initialized) return;
-      if (!isArray) {
-        keys = Object.keys(value);
-        size = keys.length;
-        summary.textContent = `${label} {${size}}`;
-      }
-      initialized = true;
-      appendBatch();
-    }
-
-    details.addEventListener("toggle", expand);
-    expand();
-    return details;
-  }
-  const line = document.createElement("div");
-  line.textContent = `${label}: ${value === null ? "null" : JSON.stringify(value)}`;
-  return line;
 }
 
 function renderMessageMetadata(message, className) {

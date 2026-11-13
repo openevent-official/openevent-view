@@ -47,7 +47,7 @@ from zipfile import ZipFile
 try:
     from packaging.requirements import Requirement
 except ImportError:
-    raise SystemExit("e2e requires installed packaging; install the declared test extras")
+    raise SystemExit("e2e requires installed packaging; install the declared runtime dependencies")
 
 with ZipFile(sys.argv[1]) as wheel:
     metadata_files = [name for name in wheel.namelist() if name.endswith(".dist-info/METADATA")]

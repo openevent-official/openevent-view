@@ -231,55 +231,54 @@ test("detail request supports seq zero and restores credential entry after timeo
   assert.equal(app.timers.size, 0);
 });
 
-test("list payloads stay unparsed until expanded and reuse their content when reopened", async () => {
+test("small list payloads start expanded and reuse their content when reopened", async () => {
   const parsed = [];
   const app = createApp(false, { onJsonParse: (text) => parsed.push(text) });
-  const payload = utf8Payload(JSON.stringify(Array.from({ length: 205 }, (_, index) => index)));
+  const payload = utf8Payload(JSON.stringify({ items: Array.from({ length: 205 }, (_, id) => ({ id })) }));
   app.setFetch(async () => response({
-    messages: Array.from({ length: 1000 }, (_, index) => ({ ...message, seq: String(index), payload })),
+    messages: Array.from({ length: 2 }, (_, index) => ({ ...message, seq: String(index), payload })),
   }));
   app.ids.get("principalInput").value = "2";
   await app.ids.get("queryForm").fire("submit");
   await settled();
   const panels = app.ids.get("messageList").children.map((card) => card.children[1]);
-  assert.equal(panels.length, 1000);
-  assert.deepEqual(parsed, [], "a full list does not parse any payload JSON");
+  assert.equal(panels.length, 2);
+  assert.deepEqual(parsed, [payload.text, payload.text], "small payloads are parsed when the list renders");
   for (const panel of panels) {
     assert.equal(panel.tagName, "details");
-    assert.equal(panel.open, false);
-    assert.equal(panel.children.length, 1, "no payload content exists before expansion");
+    assert.equal(panel.open, true);
     const summary = panel.children[0];
     assert.equal(summary.tagName, "summary");
     assert.equal(summary.children[0].textContent, `encoding: utf-8 · size: ${payload.size_bytes} bytes`);
   }
 
   const panel = panels[0];
-  panel.open = true;
-  await panel.fire("toggle");
-  assert.deepEqual(parsed, [payload.text]);
-  const tree = panel.children.find((node) => node.className === "json-tree");
-  const root = tree.children[0];
-  assert.equal(root.children.length, 102, "opening creates only the first JSON batch");
-  await root.children.at(-1).fire("click");
-  assert.equal(root.children.length, 202);
+  const formatted = panel.children.find((node) => node.className === "json-text");
+  assert.equal(formatted.tagName, "pre");
+  assert.equal(formatted.children.length, 0, "JSON values share one text block");
+  assert.deepEqual(JSON.parse(formatted.textContent), JSON.parse(payload.text),
+    "all nested fields and array entries are displayed immediately");
+  const formattedText = formatted.textContent;
   await panel.children.find((node) => node.className === "payload-toggle").fire("click");
   const pre = panel.children.at(-1);
+  assert.equal(pre, formatted, "original and formatted text share the same element");
   assert.equal(pre.textContent, payload.text);
-  assert.equal(pre.hidden, false);
   const content = [...panel.children];
   panel.open = false;
   await panel.fire("toggle");
   panel.open = true;
   await panel.fire("toggle");
-  assert.deepEqual(parsed, [payload.text], "reopening does not parse again");
+  assert.deepEqual(parsed, [payload.text, payload.text], "reopening does not parse again");
   assert.equal(panel.children.length, content.length);
   content.forEach((node, index) => assert.equal(panel.children[index], node));
-  assert.equal(root.children.length, 202, "expanded batches are retained");
-  assert.equal(pre.hidden, false, "the original-text selection is retained");
-  assert.equal(panels[1].children.length, 1, "other messages remain unrendered");
+  assert.equal(panel.children.find((node) => node.className === "json-text"), formatted);
+  assert.equal(pre.textContent, payload.text, "the original-text selection is retained");
+  const otherFormatted = panels[1].children.find((node) => node.className === "json-text");
+  assert.equal(otherFormatted.textContent, formattedText,
+    "other messages also retain their complete JSON text");
 });
 
-test("collapsed payloads preserve plain text, Base64, and preview content on expansion", async () => {
+test("only large list payloads start collapsed while text and Base64 render immediately", async () => {
   const cases = [
     { payload: utf8Payload("中文 is not JSON"), parses: 1 },
     { payload: utf8Payload(""), parses: 1 },
@@ -293,128 +292,75 @@ test("collapsed payloads preserve plain text, Base64, and preview content on exp
   for (const { payload, parses } of cases) {
     const parsed = [];
     const app = createApp(false, { onJsonParse: (text) => parsed.push(text) });
-    const panel = app.context.renderPayload(payload, { collapsed: true });
-    assert.equal(panel.children.length, 1);
-    assert.equal(parsed.length, 0);
-    panel.open = true;
-    await panel.fire("toggle");
+    app.setFetch(async () => response({ messages: [{ ...message, payload }] }));
+    app.ids.get("principalInput").value = "2";
+    await app.ids.get("queryForm").fire("submit");
+    await settled();
+    const panel = app.ids.get("messageList").children[0].children[1];
+    assert.equal(panel.tagName, "details");
+    assert.equal(panel.open, !payload.truncated);
+    if (payload.truncated) {
+      assert.equal(panel.children.length, 1, "large previews are created only after expansion");
+      assert.equal(parsed.length, 0);
+      panel.open = true;
+      await panel.fire("toggle");
+    }
     assert.equal(parsed.length, parses);
     assert.equal(panel.children.length, 2);
     assert.equal(panel.children[1].tagName, "pre");
     assert.equal(panel.children[1].textContent, payload.preview
       ? `omitted: ${payload.preview.omitted_bytes} bytes\n\nHEAD\n${payload.preview.head}\n\nTAIL\n${payload.preview.tail}`
       : payload.text);
+    const content = panel.children[1];
+    panel.open = false;
+    await panel.fire("toggle");
+    panel.open = true;
+    await panel.fire("toggle");
+    assert.equal(panel.children.length, 2);
+    assert.equal(panel.children[1], content, "reopening reuses the existing text or preview");
+    assert.equal(parsed.length, parses);
   }
 });
 
 test("detail pages render payload JSON immediately without a collapsed wrapper", async () => {
   const parsed = [];
   const app = createApp(true, { onJsonParse: (text) => parsed.push(text) });
-  app.setFetch(async () => response({ message }));
+  const payload = utf8Payload('{"nested":[{"ready":true}]}');
+  app.setFetch(async () => response({ message: { ...message, payload } }));
   const form = app.ids.get("detailContent").children[0];
   form.elements[0].value = "2";
   form.elements[1].value = "secret";
   await form.fire("submit");
   const panel = app.ids.get("detailContent").children[0].children[1];
   assert.equal(panel.tagName, "div");
-  assert.deepEqual(parsed, [message.payload.text]);
-  const tree = panel.children.find((node) => node.className === "json-tree");
-  assert.equal(tree.children[0].open, true);
-  assert.equal(tree.children[0].children[1].textContent, "ready: true");
+  assert.deepEqual(parsed, [payload.text]);
+  const formatted = panel.children.find((node) => node.className === "json-text");
+  assert.equal(formatted.tagName, "pre");
+  assert.equal(formatted.textContent, '{\n  "nested": [\n    {\n      "ready": true\n    }\n  ]\n}');
+  assert.equal(formatted.children.length, 0);
 });
 
-test("a large array creates only its first batch, and nested branches load on expansion", async () => {
+test("JSON content stays complete without adding elements for each field or array entry", () => {
   const app = createApp();
-  const panel = app.context.renderPayload(utf8Payload(JSON.stringify(Array(100000).fill(0))));
-  const tree = panel.children.find((node) => node.className === "json-tree");
-  assert.equal(tree.className, "json-tree");
-  const root = tree.children[0];
-  assert.equal(root.children.length, 102); // summary, 100 values, more button
-  assert.ok(descendants(panel).length < 112);
-  await root.children.at(-1).fire("click");
-  assert.equal(root.children.length, 202);
-  assert.equal(root.children[200].textContent, "199: 0");
-
-  const nested = app.context.renderJsonNode({ nested: Array(100000).fill(0) }, "payload", true);
-  const branch = nested.children[1];
-  assert.equal(branch.children.length, 1);
-  branch.open = true;
-  await branch.fire("toggle");
-  assert.equal(branch.children.length, 102);
-  branch.open = false;
-  await branch.fire("toggle");
-  branch.open = true;
-  await branch.fire("toggle");
-  assert.equal(branch.children.length, 102, "reopening keeps the rendered batch");
-});
-
-test("object branches enumerate on first expansion and render complete batches once", async () => {
-  for (const initiallyOpen of [false, true]) {
-    const app = createApp();
-    const enumerations = Array(101).fill(0);
-    const values = enumerations.map((_, branchIndex) => new Proxy(
-      Object.fromEntries(Array.from({ length: 205 }, (_, index) => [`key${index}`, index])),
-      { ownKeys(target) {
-        enumerations[branchIndex] += 1;
-        return Reflect.ownKeys(target);
-      } },
-    ));
-    const root = app.context.renderJsonNode(values, "payload", true);
-    assert.equal(root.children[0].textContent, "payload [101]");
-    assert.equal(root.children.length, 102, "only the first batch of branches is created");
-    assert.ok(enumerations.every((count) => count === 0), "folded branches do not enumerate fields");
-    const branch = initiallyOpen
-      ? app.context.renderJsonNode(values[0], "0", true)
-      : root.children[1];
-    if (!initiallyOpen) {
-      assert.equal(branch.children[0].textContent, "0 {…}");
-      assert.equal(branch.children.length, 1);
-      branch.open = true;
-      await branch.fire("toggle");
-    }
-    assert.equal(branch.children[0].textContent, "0 {205}");
-    assert.equal(branch.children.length, 102);
-    await branch.children.at(-1).fire("click");
-    await branch.children.at(-1).fire("click");
-    assert.deepEqual(branch.children.slice(1).map((node) => node.textContent),
-      Array.from({ length: 205 }, (_, index) => `key${index}: ${index}`));
-    assert.equal(branch.children.at(-1).tagName, "div");
-    const children = [...branch.children];
-    branch.open = false;
-    await branch.fire("toggle");
-    branch.open = true;
-    await branch.fire("toggle");
-    children.forEach((node, index) => assert.equal(branch.children[index], node));
-    assert.equal(enumerations[0], 1, "more batches and reopening reuse the enumerated fields");
-    assert.ok(enumerations.slice(1).every((count) => count === 0));
-
-    await root.children.at(-1).fire("click");
-    const lastBranch = root.children.at(-1);
-    assert.equal(lastBranch.children[0].textContent, "100 {…}");
-    assert.equal(enumerations[100], 0, "later batches also leave folded objects untouched");
+  const cases = [
+    {}, [], null, true, 42, "中文",
+    {
+      items: Array.from({ length: 8191 }, (_, index) => index),
+      fields: Object.fromEntries(Array.from({ length: 205 }, (_, index) => [`key${index}`, index])),
+      emptyObject: {}, emptyArray: [],
+    },
+  ];
+  let elementCount;
+  for (const value of cases) {
+    const panel = app.context.renderPayload(utf8Payload(JSON.stringify(value)));
+    const formatted = panel.children.find((node) => node.className === "json-text");
+    assert.equal(formatted.tagName, "pre");
+    assert.equal(formatted.children.length, 0);
+    assert.deepEqual(JSON.parse(formatted.textContent), value);
+    assert.equal(descendants(panel).filter((node) => node.tagName === "pre").length, 1);
+    elementCount ??= descendants(panel).length;
+    assert.equal(descendants(panel).length, elementCount, "DOM size does not grow with JSON values");
   }
-});
-
-test("an empty object reveals its zero field count only on first expansion", async () => {
-  const app = createApp();
-  let enumerations = 0;
-  const value = new Proxy({}, { ownKeys(target) {
-    enumerations += 1;
-    return Reflect.ownKeys(target);
-  } });
-  const root = app.context.renderJsonNode(value, "payload");
-  assert.equal(enumerations, 0);
-  assert.equal(root.children[0].textContent, "payload {…}");
-  root.open = true;
-  await root.fire("toggle");
-  assert.equal(enumerations, 1);
-  assert.equal(root.children[0].textContent, "payload {0}");
-  assert.equal(root.children.length, 1, "empty objects do not add a more button");
-  root.open = false;
-  await root.fire("toggle");
-  root.open = true;
-  await root.fire("toggle");
-  assert.equal(enumerations, 1);
 });
 
 test("list and detail show the same metadata including seq zero", async () => {
@@ -514,7 +460,7 @@ test("every payload shows its encoding and original byte count", () => {
     assert.equal(metadata.textContent, `encoding: ${payload.encoding} · size: ${payload.size_bytes} bytes`);
     if (payload.preview) {
       assert.match(panel.children.at(-1).textContent, new RegExp(`omitted: ${payload.preview.omitted_bytes} bytes`));
-      assert.equal(panel.children.some((node) => node.className === "json-tree"), false);
+      assert.equal(panel.children.some((node) => node.className === "json-text"), false);
     }
   }
 });
@@ -523,45 +469,41 @@ test("JSON view preserves exact original text and plain text or Base64 is never 
   const app = createApp();
   const original = ' { "id": 9007199254740993, "a": 1, "a": 2 }\n';
   const panel = app.context.renderPayload(utf8Payload(original));
-  const tree = panel.children.find((node) => node.className === "json-tree");
+  const formatted = panel.children.find((node) => node.className === "json-text");
   const toggle = panel.children.find((node) => node.className === "payload-toggle");
   const pre = panel.children.at(-1);
-  assert.ok(tree);
-  assert.equal(pre.hidden, true);
+  assert.ok(formatted);
+  assert.equal(pre, formatted);
+  const formattedText = pre.textContent;
   assert.equal(toggle.textContent, "View original text");
   await toggle.fire("click");
   assert.equal(pre.textContent, original, "original numbers, duplicate keys and whitespace are preserved");
-  assert.equal(pre.hidden, false);
-  assert.equal(tree.hidden, true);
   assert.equal(toggle.textContent, "View JSON");
   await toggle.fire("click");
-  assert.equal(pre.hidden, true);
-  assert.equal(tree.hidden, false);
+  assert.equal(panel.children.at(-1), pre);
+  assert.equal(pre.textContent, formattedText);
+  assert.equal(toggle.textContent, "View original text");
 
   for (const payload of [utf8Payload("{not JSON}"), utf8Payload(""),
     { encoding: "base64", text: "1234", size_bytes: 3, truncated: false }]) {
     const plain = app.context.renderPayload(payload);
-    assert.equal(plain.children.some((node) => node.className === "json-tree"), false);
+    assert.equal(plain.children.some((node) => node.className === "json-text"), false);
     assert.equal(plain.children.at(-1).textContent, payload.text);
   }
 });
 
-test("deep JSON creates one level at a time and can show its source without traversal", async () => {
+test("deep JSON remains complete as formatted text or original-text fallback", async () => {
   const app = createApp();
   const text = "[".repeat(5000) + "0" + "]".repeat(5000);
   const panel = app.context.renderPayload(utf8Payload(text));
-  const tree = panel.children.find((node) => node.className === "json-tree");
-  assert.ok(tree, "deep valid JSON is displayed as a tree");
-  assert.ok(descendants(panel).length < 15, "unexpanded descendants do not become DOM nodes");
-  let branch = tree.children[0].children[1];
-  for (let depth = 0; depth < 5; depth += 1) {
-    assert.equal(branch.children.length, 1);
-    branch.open = true;
-    await branch.fire("toggle");
-    assert.equal(branch.children.length, 2);
-    branch = branch.children[1];
+  const formatted = panel.children.find((node) => node.className === "json-text");
+  if (formatted) {
+    assert.equal(formatted.tagName, "pre");
+    assert.equal(formatted.children.length, 0);
+    assert.equal(formatted.textContent.replace(/\s/g, ""), text);
+    await panel.children.find((node) => node.className === "payload-toggle").fire("click");
   }
-  await panel.children.find((node) => node.className === "payload-toggle").fire("click");
+  assert.ok(descendants(panel).length < 10, "deep JSON does not create a nested DOM tree");
   assert.equal(panel.children.at(-1).textContent, text);
 });
 

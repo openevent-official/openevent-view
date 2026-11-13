@@ -63,7 +63,7 @@ Content-Type: application/json
 
 ## 验证
 
-测试前需要在 `PYTHON` 选定的 Python 环境中安装包声明的运行依赖和 `test` 可选依赖；
+测试前需要在 `PYTHON` 选定的 Python 环境中安装包声明的运行依赖；
 `PYTHON` 默认是 `python3`。前端测试需要 Node.js 18 或更新版本。测试不自动安装 SDK，
 也不从 SDK 子模块加载代码。
 

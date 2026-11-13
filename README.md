@@ -71,7 +71,7 @@ for complete fields, boundaries, and error rules.
 
 ## Verification
 
-Install the declared runtime and `test` optional dependencies in the Python
+Install the declared runtime dependencies in the Python
 environment selected by `PYTHON`, which defaults to `python3`. Frontend tests
 require Node.js 18 or newer. Tests do not automatically install the SDK or load
 code from its submodule.

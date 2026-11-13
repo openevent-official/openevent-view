@@ -27,13 +27,13 @@ try:
     else:
         import tomli as tomllib
 except ImportError as error:
-    print(f"missing test dependency: {error.name}; install the declared test extras", file=sys.stderr)
+    print(f"missing runtime dependency: {error.name}; install the declared runtime dependencies", file=sys.stderr)
     sys.exit(2)
 
 with open("pyproject.toml", "rb") as stream:
     project = tomllib.load(stream)["project"]
 failures = []
-for declaration in project["dependencies"] + project["optional-dependencies"]["test"]:
+for declaration in project["dependencies"]:
     requirement = Requirement(declaration)
     if requirement.marker and not requirement.marker.evaluate():
         continue

@@ -116,20 +116,20 @@ cancellation does not guarantee that server work immediately
 stops; the server still applies its own query budget.
 
 Messages display their top-level metadata and the payload encoding and original
-byte count. List payloads start collapsed. Their first expansion creates the body
-or preview and attempts to parse complete UTF-8 text as JSON; later collapses and
-expansions reuse that content without parsing again. Detail pages show the complete
-payload as soon as the message is received, without requiring an initial expansion.
-Successful parsing of complete UTF-8 text shows a JSON tree by default,
-with a switch to the original text; failures show the original text directly.
-JSON objects and arrays expand on demand, showing 100 direct children per batch
-and a Show more control for the rest. Before an object's first expansion, its
-summary shows `{…}`; expanding it reveals the exact field count, which remains
-visible after collapsing it again. Arrays always show their element count.
-The tree follows JavaScript number rules
-and may not preserve large integers exactly; use the original text to verify content.
+byte count. Complete list payloads start expanded and display their body immediately.
+Only large payloads exceeding the inline threshold start collapsed; their first
+expansion creates the preview. All list payloads can be collapsed and expanded
+manually, reusing initialized content without parsing again. Detail pages show the
+complete payload as soon as the message is received, without requiring an initial
+expansion.
+When complete UTF-8 text can be parsed and formatted as JSON, the default view
+shows all formatted content in one text block, with a switch to the original text.
+Parsing or formatting failures show the original text directly. JSON collapses
+and expands with the whole payload; long lines and indentation can be viewed by
+scrolling horizontally. The formatted view follows JavaScript parsing rules;
+use the original text to verify large-integer precision, duplicate keys, and other content.
 Large payloads show a list preview when expanded and open complete content in a new tab.
-External fields and errors are rendered as text or JSON nodes, never HTML or scripts.
+External fields and errors are rendered as text, never HTML or scripts.
 
 ## 4. HTTP API
 
