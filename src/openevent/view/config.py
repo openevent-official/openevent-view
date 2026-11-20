@@ -1,11 +1,16 @@
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 from pathlib import Path
+from sys import float_info
+from threading import TIMEOUT_MAX
 from typing import Any
 
 import yaml
+
+
+# Socket polling uses a signed 32-bit timeout in milliseconds.
+MAX_REQUEST_TIMEOUT_SECONDS = (2**31 - 1) / 1000
 
 
 class ConfigError(ValueError):
@@ -49,7 +54,7 @@ def load_config(path: str | Path | None = None) -> ViewConfig:
         return parse_config({})
     with Path(path).open("r", encoding="utf-8") as file:
         raw = yaml.safe_load(file)
-    return parse_config(raw or {})
+    return parse_config({} if raw is None else raw)
 
 
 def parse_config(raw: Any) -> ViewConfig:
@@ -99,15 +104,17 @@ def parse_config(raw: Any) -> ViewConfig:
                 server_data.get("host", ServerConfig.host), "server.host"
             ),
             port=_port(server_data.get("port", ServerConfig.port), "server.port"),
-            request_timeout_seconds=_positive_number(
+            request_timeout_seconds=_timeout_seconds(
                 server_data.get(
                     "request_timeout_seconds", ServerConfig.request_timeout_seconds
                 ),
                 "server.request_timeout_seconds",
+                MAX_REQUEST_TIMEOUT_SECONDS,
             ),
-            query_timeout_seconds=_positive_number(
+            query_timeout_seconds=_timeout_seconds(
                 server_data.get("query_timeout_seconds", ServerConfig.query_timeout_seconds),
                 "server.query_timeout_seconds",
+                TIMEOUT_MAX,
             ),
             max_request_body_bytes=_positive_int(
                 server_data.get(
@@ -121,7 +128,7 @@ def parse_config(raw: Any) -> ViewConfig:
                 openevent_data.get("target", OpenEventConfig.target),
                 "openevent.target",
             ),
-            rpc_timeout_seconds=_positive_number(
+            rpc_timeout_seconds=_timeout_seconds(
                 openevent_data.get(
                     "rpc_timeout_seconds", OpenEventConfig.rpc_timeout_seconds
                 ),
@@ -157,14 +164,13 @@ def _positive_int(value: Any, field: str) -> int:
     return value
 
 
-def _positive_number(value: Any, field: str) -> float:
+def _timeout_seconds(value: Any, field: str, maximum: float = float_info.max) -> float:
     if (
         not isinstance(value, (int, float))
         or isinstance(value, bool)
-        or not math.isfinite(value)
-        or value <= 0
+        or not 0 < value <= maximum
     ):
-        raise ConfigError(f"{field} must be a positive number")
+        raise ConfigError(f"{field} must be a positive number no greater than {maximum} seconds")
     return float(value)
 
 

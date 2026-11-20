@@ -11,14 +11,25 @@ previews and open their complete content in a new tab.
 ## Documentation
 
 The [reference](docs/REFERENCE.md) is authoritative for configuration, HTTP APIs,
-payload representation, and deployment boundaries. This README contains only
-installation, quick start, and verification entry points.
+payload representation, and deployment boundaries. This README covers building and
+installing View and querying message history.
 
 ## Installation and Startup
 
-Python 3.10 or newer is required. [pyproject.toml](pyproject.toml) declares runtime
-dependencies; the SDK minimum is 0.13.0. Actual deployments use the SDK installed
-in the Python environment running View. The SDK submodule is a source reference only.
+View requires Python 3.10 or newer and uses the SDK installed in its Python environment.
+The SDK submodule is a source reference only. See [pyproject.toml](pyproject.toml) for runtime dependencies.
+
+If you use a virtual environment, activate it first. Use the same shell to set up the SDK,
+install View, and start it. This example uses an existing virtual environment at `/opt/openevent-view`.
+
+```bash
+source /opt/openevent-view/bin/activate
+```
+
+Before running `make install`, install an `openevent-sdk` wheel (version 0.13.0 or newer)
+in the Python environment you will use for View, or configure pip to use a package source
+that provides a compatible version. To build the wheel, see the
+[SDK build instructions](https://github.com/openevent-official/openevent-sdk/blob/2183f679bc9e040db96aaab1eeda044bab91e856/README.md#build-and-test).
 
 ```bash
 make install
@@ -43,16 +54,29 @@ During development, run this repository's source directly:
 PYTHONPATH=src python3 -B -m openevent.view --config openevent-view.yaml
 ```
 
-`--host` and `--port` override the listen address. Use `make build` to build only;
-release wheels go in `dist/`. Temporary files, caches, and logs stay in `build/`,
-not source directories.
+`--host` and `--port` override the listen address.
 
-`make install` installs only the unique wheel from the current successful build,
-replacing installed View even at the same version. Dependencies are resolved from
-the package declaration, preserving those already satisfying requirements. Choose
-the environment with `PYTHON`, for example
-`make install PYTHON=/opt/openevent-view/bin/python`. Using `--target`, `--prefix`,
-or `--root` to redirect installation into another environment is not supported.
+## Build Commands
+
+Run these commands from the View repository root. Use `PYTHON` to select a writable
+Python environment with pip installed. The default is `python3`. For example, run
+`make install PYTHON=/opt/openevent-view/bin/python`.
+
+| Command | Purpose |
+| --- | --- |
+| `make build` | Build the wheel under `build/` and move it to `dist/` on success. |
+| `make install` | Install the wheel from this build, replacing View even at the same version. pip installs missing or incompatible dependencies and reuses those that meet the requirements. |
+| `make clean` | Remove View's temporary build files and release packages. Keep development environments, offline dependencies, and other projects' packages. |
+
+Installation stops before the build if install arguments, environment variables, or pip
+configuration specify `--python`, `--target`, `--prefix`, or `--root`.
+
+For an offline install, put the build and runtime dependencies, including their transitive
+dependencies, for the target environment in `build/wheelhouse/`, then run:
+
+```bash
+PIP_NO_INDEX=1 PIP_FIND_LINKS=build/wheelhouse make install
+```
 
 ## Quick Query
 
@@ -68,39 +92,3 @@ Content-Type: application/json
 The response contains `messages` and `next_cursor`. Pass a non-null cursor back
 unchanged to read older messages. See the [HTTP API](docs/REFERENCE.md#4-http-api)
 for complete fields, boundaries, and error rules.
-
-## Verification
-
-Install the declared runtime dependencies in the Python
-environment selected by `PYTHON`, which defaults to `python3`. Frontend tests
-require Node.js 18 or newer. Tests do not automatically install the SDK or load
-code from its submodule.
-
-```bash
-make test
-make check-docs
-```
-
-`make test-python` and `make test-frontend` run the suites separately. End-to-end
-verification uses the current successfully built View wheel and an explicitly
-selected OpenEvent server executable:
-
-```bash
-make e2e OPENEVENT_SERVER_BIN=/path/to/current/build/openevent_server
-```
-
-When `PYTHON` selects an existing virtual environment, dependency checks, tests,
-and the View process all use that environment's interpreter and installed
-dependencies. For example:
-
-```bash
-make e2e PYTHON=/opt/openevent-view/bin/python \
-  OPENEVENT_SERVER_BIN=/path/to/current/build/openevent_server
-```
-
-The test installs only the current View wheel into `build/e2e/site/` and loads it
-from there. It does not create a child virtual environment or replace View or
-third-party dependencies installed in the selected environment.
-
-Select the server artifact from a successful build of its current version. Test
-configuration, data, and logs stay in `build/e2e/`.

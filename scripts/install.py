@@ -1,41 +1,50 @@
-"""Install the unique View wheel produced by the successful make build prerequisite."""
+"""Build View and install the resulting wheel when requested."""
 
-import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
+from tempfile import TemporaryDirectory
+
+from pip._internal.cli.main_parser import create_main_parser
+from pip._internal.commands import create_command
 
 
-ROOT = Path(__file__).resolve().parents[1]
+def check_destination(arguments):
+    general, _ = create_main_parser().parse_args(["install", *arguments])
+    if getattr(general, "python", None):
+        sys.exit("pip has --python set; choose the Python environment with PYTHON instead")
+    command = create_command("install", isolated="--isolated" in arguments)
+    options, _ = command.parser.parse_args(arguments)
+    for flag in ("--python", "--target", "--prefix", "--root"):
+        option = command.parser.get_option(flag)
+        if option and getattr(options, option.dest) is not None:
+            sys.exit(f"pip has {flag} set; choose the Python environment with PYTHON instead")
 
 
-def main():
-    arguments = sys.argv[1:]
-    destinations = ("--target", "--prefix", "--root")
-    if (any(argument.startswith("-t") or any(
-            argument == option or argument.startswith(option + "=")
-            for option in destinations) for argument in arguments)
-            or any(os.environ.get(name) for name in ("PIP_TARGET", "PIP_PREFIX", "PIP_ROOT"))):
-        sys.exit("make install installs into the selected Python environment; "
-                 "choose its interpreter with PYTHON instead of --target, --prefix, or --root")
+def main(mode="build", *arguments):
+    if mode == "install":
+        check_destination([])
+        if arguments:
+            check_destination(list(arguments))
 
-    wheels = list((ROOT / "dist").glob("openevent_view-*.whl"))
-    if len(wheels) != 1:
-        sys.exit("Exactly one View wheel from a successful make build is required")
-
-    temporary = ROOT / "build" / "tmp"
+    temporary = Path("build/tmp")
     temporary.mkdir(parents=True, exist_ok=True)
-    environment = dict(os.environ, PYTHONDONTWRITEBYTECODE="1", PIP_NO_COMPILE="1",
-                       PIP_NO_CACHE_DIR="1", PIP_DISABLE_PIP_VERSION_CHECK="1",
-                       TMPDIR=str(temporary))
-    pip = [sys.executable, "-B", "-m", "pip", "install", "--no-compile"]
-    # Let pip resolve the wheel's declared dependencies without upgrading satisfied
-    # dependencies, then replace only View, including an installed identical version.
-    # If dependency resolution fails, do not attempt the replacement.
-    subprocess.run(pip + arguments + [str(wheels[0])], env=environment, check=True)
-    subprocess.run(pip + ["--force-reinstall", "--no-deps"] + arguments + [str(wheels[0])],
-                   env=environment, check=True)
+    pip = [sys.executable, "-B", "-m", "pip"]
+    with TemporaryDirectory(dir=temporary) as output:
+        subprocess.run([*pip, "wheel", "--no-deps", "--wheel-dir", output, "."], check=True)
+        wheel, = Path(output).glob("*.whl")
+        release = Path("dist") / wheel.name
+        release.parent.mkdir(exist_ok=True)
+        shutil.move(wheel, release)
+    print(f"Built {release}", flush=True)
+
+    if mode == "install":
+        install = [*pip, "install", "--no-compile"]
+        subprocess.run([*install, *arguments, str(release)], check=True)
+        subprocess.run([*install, "--force-reinstall", "--no-deps", *arguments, str(release)],
+                       check=True)
 
 
 if __name__ == "__main__":
-    main()
+    main(*sys.argv[1:])

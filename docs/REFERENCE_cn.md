@@ -4,9 +4,10 @@
 
 本文是 View 的配置、HTTP API 和部署边界的唯一权威说明。安装和启动见
 [README](../README_cn.md)；上游历史、认证和权限语义见
-[OpenEvent API](../openevent-sdk/docs/API_cn.md)。View 是只读查看工具，通过部署时运行
+[OpenEvent API](https://github.com/openevent-official/openevent-sdk/blob/2183f679bc9e040db96aaab1eeda044bab91e856/docs/API_cn.md)。View 是只读查看工具，通过部署时运行
 View 的 Python 环境中已安装的 `openevent-sdk>=0.13.0` 访问 OpenEvent，不直接读取服务端存储。
-启动时按当前 View 包的依赖声明检查已安装的 SDK；SDK 缺失或版本不满足要求时，报错退出，
+启动时按当前 View 包的依赖声明检查已安装的 SDK。与 pip 一样，已安装的预发布版本只要
+满足声明的版本范围即可使用。SDK 缺失或版本不满足要求时，报错退出，
 不开始监听。安装版本使用本包安装元数据中的依赖声明；直接运行源码时使用该源码仓库的
 `pyproject.toml`。两种入口都不从 SDK 子模块加载源码。
 
@@ -22,13 +23,15 @@ View 面向可信内网，默认监听本机。查询权限由请求中的 OpenE
 或超过 5 秒时，需要重新输入凭据。新标签被拦截时，列表保留原状并提示允许弹窗后重试。
 
 View 不跨请求缓存消息或 payload，只保留有界的 Channel 展示信息缓存。消息接口的成功和
-错误响应均使用 `Cache-Control: no-store`。SDK `object_keys` 只投影为保持顺序和重复项的
+错误响应、HTML 页面及 CSS/JavaScript 静态资源均使用 `Cache-Control: no-store`。
+SDK `object_keys` 只投影为保持顺序和重复项的
 `object_ids`；`object_token` 不进入 HTTP 响应、HTML、页面状态或日志。此规则不解释或修改
 不透明 payload 中的内容。
 
 ## 2. 配置
 
-省略配置文件或省略字段时使用以下默认值：
+配置文件使用 YAML，顶层应为键值映射。省略配置文件、留空或填写 `null` 时使用全部默认值。
+只填写部分字段时，其余字段使用下列默认值。
 
 ```yaml
 version: v1
@@ -57,8 +60,8 @@ history:
 | `version` | 必须为 `v1` |
 | `server.host` | 非空的 HTTP 监听 IPv4 地址，或可解析到 IPv4 的主机名；不支持 IPv6 |
 | `server.port` | HTTP 端口，整数 `1..65535` |
-| `server.request_timeout_seconds` | HTTP socket 读写超时，有限正数，单位为秒 |
-| `server.query_timeout_seconds` | 一次历史或详情查询的总预算，有限正数，单位为秒；涵盖认证、Fetch、扫描、消息投影以及 Channel 查询和排队 |
+| `server.request_timeout_seconds` | HTTP socket 读写超时，单位为秒，大于 0 且不超过 2,147,483.647 |
+| `server.query_timeout_seconds` | 一次历史或详情查询的总预算，单位为秒，大于 0 且不超过当前 Python 平台的 `threading.TIMEOUT_MAX`。包括认证、Fetch、扫描、消息投影以及 Channel 查询和排队 |
 | `server.max_request_body_bytes` | POST 请求体字节数上限，正整数 |
 | `openevent.target` | 非空的 OpenEvent gRPC 地址 |
 | `openevent.rpc_timeout_seconds` | 单次 OpenEvent RPC 的最大等待时间，有限正数，单位为秒；同时受查询剩余预算限制 |
@@ -66,12 +69,16 @@ history:
 | `openevent.channel_lookup_workers` | Channel 查询的全局最大并发数，整数 `1..64` |
 | `history.default_limit` | API 默认返回条数，整数 `1..history.max_limit` |
 | `history.max_limit` | API 允许的最大返回条数，整数 `1..1000` |
-| `history.fetch_batch_size` | 固定扫描窗口的 seq 跨度及单次 `Fetch.limit`，整数 `1..1000` |
+| `history.fetch_batch_size` | 固定扫描窗口的 seq 跨度，也是单次 `Fetch.limit` 的上限，整数 `1..1000` |
 
 整数和数值配置都不接受 boolean。配置必须满足
 `1 <= history.default_limit <= history.max_limit <= 1000`；不合法时拒绝启动。
 `history.max_limit` 可以大于 `history.fetch_batch_size`，一页会扫描多个窗口。
 过滤后消息稀疏时也使用同样大小的窗口，直到凑满一页、到达历史下界或查询预算耗尽。
+
+例如，一页显示 100 条，最近 1000 条都是可见的小消息。用默认扫描窗口 1000，View 会取回这 1000 条，
+给页面返回最新的 100 条。把 `history.fetch_batch_size` 设为 100，取回 100 条就能填满同一页。
+按频道或接收方筛选时，如果要扫过很多序号才能凑够一页，较大的窗口有助于减少 Fetch 调用次数。
 
 HTTP socket 超时、单次 RPC 超时和整次查询预算是三个不同限制。查询预算在 RPC、扫描、
 消息投影和 Channel 等待边界检查，不会强行中断正在执行的单次 CPU 转换。预算耗尽返回
@@ -87,19 +94,22 @@ HTTP socket 超时、单次 RPC 超时和整次查询预算是三个不同限制
 页面使用服务端默认页大小，不暴露 `from_seq`、`limit` 或游标输入框。“下一页”查看更早消息，
 “上一页”重新查询已访问的较新页，“查看最新”重新读取最新页。重新查询的结果可能随新增
 消息或权限变化而改变，页面不会自动插入新消息。
+首页为空时，页面提示没有找到可见消息。翻到空页时，提示没有更早的匹配消息，仍可返回上一页。
 
-修改输入框不会改变已显示结果的查询条件；只有“查询”成功才切换生效状态。分页、查看最新
-和打开完整内容使用当前结果的凭据及条件。每次请求等待期间保留原结果，成功后一次性替换；
-失败或超时后保留原结果和分页位置、显示原因并恢复操作。页面同时只执行一个操作，
+只有点击“查询”且查询成功后，修改后的输入才生效。分页和“查看最新”沿用当前结果的凭据和过滤条件。
+列表等待请求期间保留原结果，成功后一次性替换。失败或超时后保留原结果和分页位置、显示原因并恢复操作。页面同时只执行一个操作，
 请求在 35 秒后自动取消等待；关闭页面也可放弃等待。浏览器停止等待不保证服务端
 立即停止工作，服务端仍由自己的查询预算限制。
+
+打开完整内容时，详情页使用当前结果的凭据，按所选消息的 `seq` 重新读取。
+在详情页手动提交凭据后，输入框会清空。读取失败时，页面显示错误，可以重新输入凭据再试。
 
 每条消息显示顶层元数据和 payload 的编码、原始字节数。列表中的完整 payload 默认展开并
 立即显示正文，只有超过内联阈值的大 payload 默认折叠，首次展开时才创建预览。列表中的
 payload 都可以手动收起或展开；再次展开复用已初始化的内容，不重复解析。详情页取得消息后
 直接显示完整 payload，无需先展开。
-完整 UTF-8 文本可以解析并格式化为 JSON 时，默认在一个文本块中显示全部格式化内容，
-可切换查看原文；解析或格式化失败时直接显示原文。JSON 随 payload 整体收起或展开，
+完整 UTF-8 文本可以解析并格式化为 JSON 时，默认在一个文本块中显示全部格式化内容。
+只有格式化结果与原文不同时才显示切换按钮。解析或格式化失败时直接显示原文。JSON 随 payload 整体收起或展开，
 长行和缩进可以横向滚动查看。格式化视图遵循 JavaScript 的解析规则，大整数精度和
 重复键等内容以原文为准。
 大 payload 在列表中展开后显示预览，通过新标签查看完整内容。外部字段和错误信息只作为文本
@@ -117,8 +127,9 @@ payload 都可以手动收起或展开；再次展开复用已初始化的内容
 请求调用方 `principal` 必须大于 0；`channel_id`、详情 `seq` 和 `cursor.before_seq` 可以为 0。
 `limit`、payload 字节数等有界计数使用 JSON number。本规则不改变不透明 payload 自身的数字表示。
 
-每次历史和详情查询都先用本次 `principal/token` 调用 `GetStatus`。即使游标已到历史边界，
-无效凭据仍返回 `401`。历史下界固定为 seq 0，`GetStatus` 只返回 `max_seq`；
+每次历史查询先用本次 `principal/token` 调用 `GetStatus`；详情查询由唯一一次 `Fetch`
+认证，不为边界检查额外调用 `GetStatus`。即使游标或详情目标已到历史边界之外，无效凭据仍
+返回 `401`。历史下界固定为 seq 0，`GetStatus` 只返回 `max_seq`；
 `max_seq=0` 表示只有初始化消息，不表示历史为空。View 可显示 seq 0 和 Channel 0 中的
 消息，其可见性仍由 OpenEvent 决定。
 
@@ -132,7 +143,7 @@ Content-Type: application/json
   "principal": "10001",
   "token": "tok_xxx",
   "cursor": null,
-  "limit": 100,
+  "limit": 1,
   "channel_id": "10001",
   "only_my_recipient": false
 }

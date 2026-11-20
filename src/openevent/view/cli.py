@@ -33,10 +33,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.host is not None or args.port is not None:
         config = _override_server(config, args.host, args.port)
 
-    client = OpenEventClient(
-        config.openevent.target,
-        timeout_ms=config.openevent.rpc_timeout_seconds * 1000,
-    )
+    client = OpenEventClient(config.openevent.target)
     history_service = HistoryService(
         HistoryClient(client),
         config.history,
@@ -45,17 +42,12 @@ def main(argv: list[str] | None = None) -> int:
         query_timeout_seconds=config.server.query_timeout_seconds,
         rpc_timeout_seconds=config.openevent.rpc_timeout_seconds,
     )
-    server = None
     try:
-        server = create_server(config, history_service)
-        address = f"http://{config.server.host}:{config.server.port}/"
-        logging.getLogger(__name__).info("openevent-view listening on %s", address)
-        server.serve_forever()
-    except KeyboardInterrupt:
-        logging.getLogger(__name__).info("shutdown requested")
+        with create_server(config, history_service) as server:
+            address = f"http://{config.server.host}:{config.server.port}/"
+            logging.getLogger(__name__).info("openevent-view listening on %s", address)
+            server.serve_forever()
     finally:
-        if server is not None:
-            server.server_close()
         history_service.close()
         client.close()
     return 0

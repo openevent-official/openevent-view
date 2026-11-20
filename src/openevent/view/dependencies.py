@@ -6,7 +6,7 @@ import sys
 
 from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name
-from packaging.version import InvalidVersion, Version
+from packaging.version import InvalidVersion
 
 
 def _project_requirements() -> list[str]:
@@ -49,7 +49,7 @@ def require_installed_sdk() -> Requirement:
             f"openevent-view requires installed {requirement}; openevent-sdk is not installed"
         ) from exc
     try:
-        compatible = Version(installed) in requirement.specifier
+        compatible = requirement.specifier.contains(installed, prereleases=True)
     except InvalidVersion:
         compatible = False
     if not compatible:

@@ -5,14 +5,15 @@ import codecs
 import re
 import threading
 import time
-from collections import OrderedDict
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+from bisect import bisect_right
+from collections import OrderedDict, deque
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError, as_completed
 from dataclasses import dataclass
 from typing import Any, Protocol
 
 import grpc
 
-from .config import HistoryConfig
+from .config import HistoryConfig, OpenEventConfig, ServerConfig
 
 
 UINT64_MAX = 2**64 - 1
@@ -40,7 +41,7 @@ class QueryDeadline:
     def remaining(self) -> float:
         remaining = self._end - time.monotonic()
         if remaining <= 0:
-            raise QueryTimeout("history query timed out")
+            raise QueryTimeout("query timed out")
         return remaining
 
 
@@ -97,10 +98,10 @@ class HistoryService:
         self,
         client: OpenEventClientProtocol,
         history_config: HistoryConfig,
-        channel_cache_size: int = 4096,
-        channel_lookup_workers: int = 8,
-        query_timeout_seconds: float = 30.0,
-        rpc_timeout_seconds: float = 10.0,
+        channel_cache_size: int = OpenEventConfig.channel_cache_size,
+        channel_lookup_workers: int = OpenEventConfig.channel_lookup_workers,
+        query_timeout_seconds: float = ServerConfig.query_timeout_seconds,
+        rpc_timeout_seconds: float = OpenEventConfig.rpc_timeout_seconds,
     ):
         self._client = client
         self._history = history_config
@@ -122,16 +123,13 @@ class HistoryService:
         status = self._call(deadline, self._client.get_status, query.principal, query.token)
         max_seq = int(status.max_seq)
         messages: list[dict[str, Any]] = []
-        fetch_performed = False
         history_complete = True
 
         if query.before_seq != 0:
             end_seq = max_seq
             if query.before_seq is not None:
                 end_seq = min(end_seq, query.before_seq - 1)
-            messages, fetch_performed, history_complete = self._query_descending(
-                query, end_seq, deadline
-            )
+            messages, history_complete = self._query_descending(query, end_seq, deadline)
 
         channel_ids = {int(message["channel_id"]) for message in messages}
         if query.channel_id is not None:
@@ -141,11 +139,7 @@ class HistoryService:
             query.token,
             channel_ids,
             deadline,
-            force_channel_id=(
-                query.channel_id
-                if query.channel_id is not None and not fetch_performed
-                else None
-            ),
+            force_channel_id=query.channel_id if query.before_seq == 0 else None,
         )
 
         for message in messages:
@@ -161,11 +155,6 @@ class HistoryService:
 
     def get_payload(self, seq: int, query: PayloadQuery) -> dict[str, Any]:
         deadline = QueryDeadline(self._query_timeout_seconds)
-        status = self._call(deadline, self._client.get_status, query.principal, query.token)
-        max_seq = int(status.max_seq)
-        if not 0 <= seq <= max_seq:
-            raise MessageNotFound("message not found")
-
         try:
             response = self._call(
                 deadline, self._client.fetch,
@@ -199,33 +188,29 @@ class HistoryService:
 
     def _query_descending(
         self, query: HistoryQuery, end_seq: int, deadline: QueryDeadline
-    ) -> tuple[list[dict[str, Any]], bool, bool]:
+    ) -> tuple[list[dict[str, Any]], bool]:
         collected: list[dict[str, Any]] = []
         window_end = end_seq
         channels = (query.channel_id,) if query.channel_id is not None else ()
-        fetch_performed = False
         history_complete = False
 
         while window_end >= 0 and len(collected) < query.limit:
             deadline.remaining()
             remaining = query.limit - len(collected)
-            window_size = self._history.fetch_batch_size
-            window_start = max(0, window_end - window_size + 1)
+            window_start = max(0, window_end - self._history.fetch_batch_size + 1)
             window_messages, matched_count = self._fetch_window(
                 query,
                 channels,
                 window_start,
                 window_end,
-                window_size,
                 remaining,
                 deadline,
             )
-            fetch_performed = True
             collected.extend(window_messages)
             history_complete = window_start == 0 and matched_count <= remaining
             window_end = window_start - 1
 
-        return collected, fetch_performed, history_complete
+        return collected, history_complete
 
     def _fetch_window(
         self,
@@ -233,12 +218,11 @@ class HistoryService:
         channels: tuple[int, ...],
         window_start: int,
         window_end: int,
-        window_size: int,
         candidate_limit: int,
         deadline: QueryDeadline,
-    ) -> tuple[list[dict[str, Any]], int]:
+    ) -> tuple[deque[dict[str, Any]], int]:
         fetch_from = window_start
-        messages: list[dict[str, Any]] = []
+        messages: deque[dict[str, Any]] = deque(maxlen=candidate_limit)
         matched_count = 0
         while fetch_from <= window_end:
             response = self._call(
@@ -246,28 +230,21 @@ class HistoryService:
                 query.principal,
                 query.token,
                 from_seq=fetch_from,
-                limit=window_size,
+                limit=window_end - fetch_from + 1,
                 only_my_recipient=query.only_my_recipient,
                 channels=channels,
             )
-            next_seq = int(response.next_seq)
-            candidates = [
-                message for message in response.messages
-                if window_start <= int(message.seq) <= window_end
-            ]
-            matched_count += len(candidates)
-            # Fetch is ascending, and later batches are newer. Select before
-            # decoding payloads, then prepend this batch without sorting again.
-            newest = []
-            for message in reversed(candidates[-candidate_limit:]):
+            # Fetch starts inside the window and returns messages in ascending seq order.
+            batch = response.messages
+            batch_matches = bisect_right(batch, window_end, key=lambda message: message.seq)
+            matched_count += batch_matches
+            first_candidate = max(0, batch_matches - candidate_limit)
+            for index in range(first_candidate, batch_matches):
                 deadline.remaining()
-                newest.append(self._message_to_dict(message, full_payload=False))
-            messages = newest + messages[:candidate_limit - len(newest)]
+                messages.appendleft(self._message_to_dict(batch[index], full_payload=False))
+            fetch_from = int(response.next_seq)
             # Keep only the projections; release the RPC payload before the next Fetch.
-            message = None
-            del candidates
-            del response
-            fetch_from = next_seq
+            del batch, response
         return messages, matched_count
 
     @staticmethod
@@ -308,33 +285,28 @@ class HistoryService:
         force_channel_id: int | None = None,
     ) -> dict[int, ChannelDisplay]:
         displays: dict[int, ChannelDisplay] = {}
-        missing: list[int] = []
-        for channel_id in sorted(channel_ids):
-            deadline.remaining()
-            cached = None
-            if channel_id != force_channel_id:
-                cached = self._get_cached_channel(channel_id)
-            if cached is None:
-                missing.append(channel_id)
-            else:
-                displays[channel_id] = cached
-
-        futures = {
-            channel_id: self._channel_executor.submit(
-                self._get_channel, principal, token, channel_id, deadline
-            )
-            for channel_id in missing
-        }
+        futures = []
         try:
-            for channel_id, future in futures.items():
-                try:
-                    display = future.result(timeout=deadline.remaining())
-                except FutureTimeoutError as exc:
-                    raise QueryTimeout("history query timed out") from exc
-                displays[channel_id] = display
+            for channel_id in sorted(channel_ids):
+                deadline.remaining()
+                cached = None
+                if channel_id != force_channel_id:
+                    cached = self._get_cached_channel(channel_id)
+                if cached is None:
+                    futures.append(self._channel_executor.submit(
+                        self._get_channel, principal, token, channel_id, deadline
+                    ))
+                else:
+                    displays[channel_id] = cached
+
+            for future in as_completed(futures, timeout=deadline.remaining()):
+                display = future.result()
+                displays[display.channel_id] = display
                 self._cache_channel(display)
+        except FutureTimeoutError as exc:
+            raise QueryTimeout("query timed out") from exc
         finally:
-            for future in futures.values():
+            for future in futures:
                 future.cancel()
         return displays
 
@@ -417,14 +389,17 @@ def encode_payload(payload: bytes, *, full: bool = False) -> dict[str, Any]:
     head_bytes = payload[:PREVIEW_PART_BYTES]
     tail_bytes = payload[-PREVIEW_PART_BYTES:]
     if utf8:
-        head_bytes = _valid_utf8_prefix(head_bytes)
-        tail_bytes = _valid_utf8_suffix(tail_bytes)
-        head = head_bytes.decode("utf-8")
-        tail = tail_bytes.decode("utf-8")
+        # The full payload is valid UTF-8, so only a character cut by a slice can be incomplete.
+        head = head_bytes.decode("utf-8", errors="ignore")
+        tail = tail_bytes.decode("utf-8", errors="ignore")
+        head_size = len(head.encode("utf-8"))
+        tail_size = len(tail.encode("utf-8"))
         encoding = "utf-8"
     else:
         head = base64.b64encode(head_bytes).decode("ascii")
         tail = base64.b64encode(tail_bytes).decode("ascii")
+        head_size = len(head_bytes)
+        tail_size = len(tail_bytes)
         encoding = "base64"
 
     return {
@@ -434,9 +409,9 @@ def encode_payload(payload: bytes, *, full: bool = False) -> dict[str, Any]:
         "preview": {
             "head": head,
             "tail": tail,
-            "head_bytes": len(head_bytes),
-            "tail_bytes": len(tail_bytes),
-            "omitted_bytes": size - len(head_bytes) - len(tail_bytes),
+            "head_bytes": head_size,
+            "tail_bytes": tail_size,
+            "omitted_bytes": size - head_size - tail_size,
         },
     }
 
@@ -464,26 +439,6 @@ def _is_utf8(payload: bytes) -> bool:
     except UnicodeDecodeError:
         return False
     return True
-
-
-def _valid_utf8_prefix(value: bytes) -> bytes:
-    end = len(value)
-    while True:
-        try:
-            value[:end].decode("utf-8")
-            return value[:end]
-        except UnicodeDecodeError as exc:
-            end = exc.start
-
-
-def _valid_utf8_suffix(value: bytes) -> bytes:
-    start = 0
-    while True:
-        try:
-            value[start:].decode("utf-8")
-            return value[start:]
-        except UnicodeDecodeError as exc:
-            start += max(exc.end, 1)
 
 
 def _parse_cursor(value: Any) -> int | None:

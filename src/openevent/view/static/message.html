@@ -1,3 +1,31 @@
 <!doctype html>
-<html lang="en"><head><meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" /><title>OpenEvent payload</title><link rel="stylesheet" href="/static/app.css" /></head>
-<body><main class="shell"><section class="results-panel detail-panel"><div class="results-head"><strong>Complete payload</strong><span id="detailStatus">Waiting for credentials</span></div><div id="detailContent" class="detail-content"></div></section></main><script src="/static/app.js"></script></body></html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>OpenEvent payload</title>
+    <link rel="stylesheet" href="/static/app.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="results-panel detail-panel">
+        <div class="results-head">
+          <strong>Complete payload</strong>
+          <span id="detailStatus">Waiting for credentials</span>
+        </div>
+        <div class="detail-content">
+          <form id="credentialForm" autocomplete="off" hidden>
+            <div id="detailError" class="error-banner" role="alert" hidden></div>
+            <div class="detail-login">
+              <label>Principal<input id="detailPrincipal" inputmode="numeric" required /></label>
+              <label>Token<input id="detailToken" type="password" required /></label>
+              <button type="submit">Load payload</button>
+            </div>
+          </form>
+          <div id="detailContent"></div>
+        </div>
+      </section>
+    </main>
+    <script src="/static/app.js"></script>
+  </body>
+</html>

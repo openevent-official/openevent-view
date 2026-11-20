@@ -21,7 +21,6 @@ function initList() {
   const previous = $("previousButton");
   const next = $("nextButton");
   let active = null;
-  let currentCursor = null;
   let nextCursor = null;
   let cursorStack = [];
   let busy = false;
@@ -53,31 +52,21 @@ function initList() {
     if (busy) return;
     setBusy(true);
     clearError();
-    const prior = { active, currentCursor, nextCursor, cursorStack };
     try {
       const body = await request("/v1/messages", query);
+      renderResult(body, query);
       if (reset) {
-        active = { ...query, cursor: null };
-        currentCursor = null;
         cursorStack = [];
       } else if (goingBack) {
-        cursorStack = cursorStack.slice(0, -1);
-        currentCursor = query.cursor;
+        cursorStack.pop();
       } else {
-        cursorStack = [...cursorStack, currentCursor];
-        currentCursor = query.cursor;
+        cursorStack.push(active.cursor);
       }
-      nextCursor = body.next_cursor ?? null;
-      renderResult(body, active);
+      active = query;
+      nextCursor = body.next_cursor;
       status.textContent = "Ready";
     } catch (error) {
-      active = prior.active;
-      currentCursor = prior.currentCursor;
-      nextCursor = prior.nextCursor;
-      cursorStack = prior.cursorStack;
-      const message = error.message || "request failed";
-      status.textContent = `Error: ${message}`;
-      showError(message);
+      showError(error.message || "request failed");
     } finally {
       setBusy(false);
     }
@@ -97,6 +86,7 @@ function initList() {
   }
 
   function showError(message) {
+    status.textContent = "Error";
     errorBanner.textContent = message;
     errorBanner.hidden = false;
   }
@@ -107,32 +97,36 @@ function initList() {
   }
 
   function renderResult(body, query) {
-    list.replaceChildren();
-    const messages = body.messages || [];
+    const messages = body.messages;
+    const cards = messages.map((message) => renderMessage(message, query));
     if (!messages.length) {
       const empty = document.createElement("div");
       empty.className = "empty-state";
-      empty.textContent = "No visible messages found.";
-      list.appendChild(empty);
+      empty.textContent = query.cursor === null
+        ? "No visible messages found."
+        : "No earlier matching messages.";
+      cards.push(empty);
     }
-    messages.forEach((message) => list.appendChild(renderMessage(message, query)));
     const channelText = body.channel
       ? `${body.channel.channel_name || body.channel.channel_id} (${body.channel.channel_id}, ${body.channel.channel_protocol || "not set"})`
       : "all channels";
     const recipientText = query.only_my_recipient
       ? "only messages addressed to this principal"
       : "all visible messages";
-    $("resultTitle").textContent = `History for ${query.principal} · ${channelText}`;
-    meta.textContent = ` ${messages.length} message${messages.length === 1 ? "" : "s"} · ${recipientText}`;
+    const title = `History for ${query.principal} · ${channelText}`;
+    const summary = ` ${messages.length} message${messages.length === 1 ? "" : "s"} · ${recipientText}`;
+    list.replaceChildren(...cards);
+    $("resultTitle").textContent = title;
+    meta.textContent = summary;
   }
 
   function renderMessage(message, query) {
     const card = document.createElement("article");
     card.className = "message-card";
     const summary = renderMessageMetadata(message, "message-summary");
-    const actions = document.createElement("div");
-    actions.className = "message-actions";
-    if (message.payload?.truncated) {
+    if (message.payload.truncated) {
+      const actions = document.createElement("div");
+      actions.className = "message-actions";
       const detail = document.createElement("button");
       detail.type = "button";
       detail.textContent = "View complete payload";
@@ -140,8 +134,8 @@ function initList() {
         openDetail(message.seq, query, setBusy, showError, clearError);
       });
       actions.appendChild(detail);
+      summary.appendChild(actions);
     }
-    summary.appendChild(actions);
     card.append(summary, renderPayload(message.payload, { collapsible: true }));
     return card;
   }
@@ -161,9 +155,8 @@ async function request(url, body) {
     let result;
     try {
       result = await response.json();
-    } catch (error) {
-      if (controller.signal.aborted) throw error;
-      throw new Error(`HTTP ${response.status}`);
+    } catch {
+      throw new Error(`The HTTP ${response.status} response body is incomplete or contains invalid JSON.`);
     }
     if (!response.ok) throw new Error(result.error?.message || `HTTP ${response.status}`);
     return result;
@@ -178,23 +171,21 @@ async function request(url, body) {
 function renderPayload(payload, { collapsible = false } = {}) {
   const panel = document.createElement(collapsible ? "details" : "div");
   panel.className = "payload-panel";
-  if (collapsible) panel.open = !payload?.truncated;
+  if (collapsible) panel.open = !payload.truncated;
   const title = document.createElement(collapsible ? "summary" : "h2");
   title.textContent = "Payload";
   panel.appendChild(title);
   const metadata = document.createElement(collapsible ? "span" : "div");
   metadata.className = "payload-meta";
-  metadata.textContent = `encoding: ${payload?.encoding || "unknown"} · size: ${payload?.size_bytes ?? 0} bytes`;
+  metadata.textContent = `encoding: ${payload.encoding} · size: ${payload.size_bytes} bytes`;
   (collapsible ? title : panel).appendChild(metadata);
-  if (collapsible) {
-    let initialized = false;
-    function expand() {
-      if (!panel.open || initialized) return;
-      initialized = true;
+  if (collapsible && payload.truncated) {
+    function showPreview() {
+      if (!panel.open) return;
       renderPayloadContent(panel, payload);
+      panel.removeEventListener("toggle", showPreview);
     }
-    panel.addEventListener("toggle", expand);
-    expand();
+    panel.addEventListener("toggle", showPreview);
   } else {
     renderPayloadContent(panel, payload);
   }
@@ -202,24 +193,24 @@ function renderPayload(payload, { collapsible = false } = {}) {
 }
 
 function renderPayloadContent(panel, payload) {
-  if (payload?.preview) {
+  if (payload.preview) {
     const pre = document.createElement("pre");
     pre.textContent = `omitted: ${payload.preview.omitted_bytes} bytes\n\nHEAD\n${payload.preview.head}\n\nTAIL\n${payload.preview.tail}`;
     panel.appendChild(pre);
   } else {
-    const text = payload?.text ?? "";
+    const text = payload.text;
     const pre = document.createElement("pre");
     let formatted;
-    if (payload?.encoding === "utf-8") {
+    if (payload.encoding === "utf-8") {
       try {
         formatted = JSON.stringify(JSON.parse(text), null, 2);
+        pre.className = "json-text";
       } catch (_) {
         // Keep the original text if parsing or formatting is unavailable.
       }
     }
-    if (formatted !== undefined) {
-      pre.className = "json-text";
-      pre.textContent = formatted;
+    pre.textContent = formatted ?? text;
+    if (formatted !== undefined && formatted !== text) {
       const toggle = document.createElement("button");
       toggle.type = "button";
       toggle.className = "payload-toggle";
@@ -231,8 +222,6 @@ function renderPayloadContent(panel, payload) {
         toggle.textContent = original ? "View JSON" : "View original text";
       });
       panel.appendChild(toggle);
-    } else {
-      pre.textContent = text;
     }
     panel.appendChild(pre);
   }
@@ -245,10 +234,10 @@ function renderMessageMetadata(message, className) {
     ["seq", message.seq],
     ["uuid", message.uuid],
     ["time", formatTime(message.ts_ms)],
-    ["channel", `${message.channel_id} ${message.channel_name || ""} · ${message.channel_protocol || "not set"}`],
+    ["channel", `${message.channel_id} ${message.channel_name} · ${message.channel_protocol || "not set"}`],
     ["principal", message.principal],
-    ["recipients", (message.recipients || []).join(", ") || "[]"],
-    ["objects", (message.object_ids || []).join(", ") || "[]"],
+    ["recipients", message.recipients.join(", ") || "[]"],
+    ["objects", message.object_ids.join(", ") || "[]"],
   ].forEach(([name, value]) => {
     const field = document.createElement("div");
     field.className = "field";
@@ -266,7 +255,7 @@ function renderMessageMetadata(message, className) {
 
 function formatTime(value) {
   const date = new Date(Number(value));
-  return Number.isNaN(date.getTime()) ? String(value || "") : date.toISOString();
+  return Number.isNaN(date.getTime()) ? value : date.toISOString();
 }
 
 function openDetail(seq, query, setBusy, showError, clearError) {
@@ -303,28 +292,31 @@ function openDetail(seq, query, setBusy, showError, clearError) {
   child = window.open(target, "_blank");
   if (!child) {
     window.removeEventListener("message", handler);
-    const message = "allow pop-ups and try again";
-    status.textContent = `Error: ${message}`;
-    showError(message);
+    showError("allow pop-ups and try again");
     setBusy(false);
     return;
   }
   timer = setTimeout(() => {
     window.removeEventListener("message", handler);
-    const message = "detail page did not receive credentials";
-    status.textContent = `Error: ${message}`;
-    showError(message);
+    showError("detail page did not receive credentials");
     setBusy(false);
   }, 5000);
 }
 
 function initDetail() {
   const seq = new URL(location.href).searchParams.get("seq");
-  let credentialsReceived = false;
+  const form = $("credentialForm");
+  const status = $("detailStatus");
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const credentials = { principal: $("detailPrincipal").value.trim(), token: $("detailToken").value };
+    form.reset();
+    load(credentials);
+  });
+
   const timer = setTimeout(showCredentialForm, 5000);
   const handler = (event) => {
     if (
-      credentialsReceived ||
       event.origin !== location.origin ||
       event.source !== window.opener ||
       event.data?.type !== "openevent-view:credentials" ||
@@ -332,7 +324,6 @@ function initDetail() {
     ) {
       return;
     }
-    credentialsReceived = true;
     clearTimeout(timer);
     window.removeEventListener("message", handler);
     load({ principal: event.data.principal, token: event.data.token });
@@ -346,17 +337,16 @@ function initDetail() {
   }
 
   async function load(credentials) {
-    $("detailContent").replaceChildren();
-    $("detailStatus").textContent = "Loading";
+    form.hidden = true;
+    status.textContent = "Loading";
     try {
       const body = await request(
         `/v1/messages/${encodeURIComponent(seq)}/payload`,
         credentials,
       );
-      $("detailStatus").textContent = "Ready";
       $("detailContent").appendChild(renderDetailMessage(body.message));
+      status.textContent = "Ready";
     } catch (error) {
-      credentialsReceived = false;
       showCredentialForm(error.message || "request failed");
     } finally {
       credentials.principal = null;
@@ -364,47 +354,15 @@ function initDetail() {
     }
   }
 
-  function showCredentialForm(errorMessage = null) {
-    if (credentialsReceived) return;
+  function showCredentialForm(errorMessage = "") {
     clearTimeout(timer);
     window.removeEventListener("message", handler);
     window.opener = null;
-    const content = $("detailContent");
-    const form = document.createElement("form");
-    form.className = "detail-login";
-    const principalLabel = document.createElement("label");
-    principalLabel.textContent = "Principal";
-    const principal = document.createElement("input");
-    principal.required = true;
-    principal.inputMode = "numeric";
-    principalLabel.appendChild(principal);
-    const tokenLabel = document.createElement("label");
-    tokenLabel.textContent = "Token";
-    const token = document.createElement("input");
-    token.type = "password";
-    token.required = true;
-    tokenLabel.appendChild(token);
-    const submit = document.createElement("button");
-    submit.type = "submit";
-    submit.textContent = "Load payload";
-    form.append(principalLabel, tokenLabel, submit);
-    form.addEventListener("submit", async (event) => {
-      event.preventDefault();
-      for (const control of form.elements) control.disabled = true;
-      await load({ principal: principal.value.trim(), token: token.value });
-    });
-    content.replaceChildren();
-    if (errorMessage) {
-      const error = document.createElement("div");
-      error.className = "error-banner";
-      error.setAttribute("role", "alert");
-      error.textContent = errorMessage;
-      content.appendChild(error);
-    }
-    content.appendChild(form);
-    $("detailStatus").textContent = errorMessage
-      ? `Error: ${errorMessage}`
-      : "Enter credentials";
+    const error = $("detailError");
+    error.textContent = errorMessage;
+    error.hidden = !errorMessage;
+    form.hidden = false;
+    status.textContent = errorMessage ? "Error" : "Enter credentials";
   }
 }
 

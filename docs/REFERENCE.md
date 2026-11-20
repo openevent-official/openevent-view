@@ -4,13 +4,14 @@
 
 This document is the authoritative reference for View configuration, HTTP APIs,
 and deployment boundaries. See the [README](../README.md) for installation and
-startup, and the [OpenEvent API](../openevent-sdk/docs/API.md) for upstream history,
+startup, and the [OpenEvent API](https://github.com/openevent-official/openevent-sdk/blob/2183f679bc9e040db96aaab1eeda044bab91e856/docs/API.md) for upstream history,
 authentication, and permission semantics. View is a read-only tool that uses
 `openevent-sdk>=0.13.0` installed in the Python environment running the deployment;
 it does not read server storage directly.
 Startup checks the installed SDK against the current View package's dependency
-declaration. A missing or incompatible SDK causes an error before the HTTP listener
-starts. Installed View uses its package metadata; running from source uses that
+declaration. As with pip, an already installed prerelease qualifies if its version
+satisfies the declared range. A missing or incompatible SDK causes an error before
+the HTTP listener starts. Installed View uses its package metadata; running from source uses that
 checkout's `pyproject.toml`. Neither entry point loads SDK source from the submodule.
 
 ## 1. Deployment Boundary
@@ -31,14 +32,16 @@ credentials again. If a new tab is blocked, the list stays unchanged and asks th
 user to allow popups and retry.
 
 View does not cache messages or payloads across requests; its only cache is bounded
-Channel display metadata. Successful and failed message responses use
-`Cache-Control: no-store`. SDK `object_keys` are projected to `object_ids`, preserving
+Channel display metadata. Successful and failed message responses, HTML pages, and
+CSS/JavaScript static assets use `Cache-Control: no-store`. SDK `object_keys` are
+projected to `object_ids`, preserving
 order and duplicates. `object_token` never enters HTTP responses, HTML, page state,
 or logs. This rule does not interpret or modify opaque payload contents.
 
 ## 2. Configuration
 
-Omitting the configuration file or individual fields uses these defaults:
+The configuration file uses a top-level YAML mapping. An omitted file, an empty file,
+or `null` selects all defaults. Omitted fields use the defaults shown below.
 
 ```yaml
 version: v1
@@ -67,8 +70,8 @@ history:
 | `version` | Must be `v1` |
 | `server.host` | Nonempty IPv4 address or hostname resolving to IPv4 for HTTP listening; IPv6 is not supported |
 | `server.port` | HTTP port, integer `1..65535` |
-| `server.request_timeout_seconds` | HTTP socket read/write timeout, finite positive number of seconds |
-| `server.query_timeout_seconds` | Total history/detail query budget, finite positive number of seconds; covers authentication, Fetch, scanning, message projection, and Channel calls and queueing |
+| `server.request_timeout_seconds` | HTTP socket read/write timeout in seconds, greater than 0 and at most 2,147,483.647 |
+| `server.query_timeout_seconds` | Total history/detail query budget in seconds, greater than 0 and at most `threading.TIMEOUT_MAX` on the current Python platform. Includes authentication, Fetch, scanning, message projection, and Channel calls and queueing |
 | `server.max_request_body_bytes` | POST body byte limit, positive integer |
 | `openevent.target` | Nonempty OpenEvent gRPC address |
 | `openevent.rpc_timeout_seconds` | Maximum wait for one OpenEvent RPC, finite positive number of seconds; also limited by the remaining query budget |
@@ -76,13 +79,19 @@ history:
 | `openevent.channel_lookup_workers` | Global Channel lookup concurrency, integer `1..64` |
 | `history.default_limit` | Default API page size, integer `1..history.max_limit` |
 | `history.max_limit` | Maximum API page size, integer `1..1000` |
-| `history.fetch_batch_size` | Fixed scan window seq span and each `Fetch.limit`, integer `1..1000` |
+| `history.fetch_batch_size` | Fixed scan window span in sequence positions and upper bound on each `Fetch.limit`, integer `1..1000` |
 
 Integer and numeric settings reject booleans. Configuration must satisfy
 `1 <= history.default_limit <= history.max_limit <= 1000`; invalid configuration
 prevents startup. `history.max_limit` may exceed `history.fetch_batch_size`, in
 which case a page scans multiple windows. Sparse filtered results use the same
 window size until the page is full, the history boundary is reached, or the query budget expires.
+
+For example, suppose a page displays 100 messages and the latest 1000 messages are all small
+and visible. With the default window of 1000, View fetches all 1000 and returns the newest 100.
+With `history.fetch_batch_size` set to 100, fetching 100 messages fills the same page.
+When a channel or recipient filter matches only a few messages across many sequence numbers,
+a larger window can reduce the number of Fetch calls.
 
 The HTTP socket timeout, individual RPC timeout, and total query budget are
 separate limits. The query budget is checked at RPC, scanning, projection, and
@@ -104,16 +113,22 @@ page size and does not expose `from_seq`, `limit`, or cursor inputs. Next loads
 older messages, Previous queries an already visited newer page again, and Latest
 queries the newest page again. Repeated queries can change with appended messages
 or permission changes. New messages are not inserted automatically.
+An empty first page says no visible messages were found. An empty older page says
+there are no earlier matching messages, and Previous remains available.
 
-Editing inputs does not change the displayed results' query conditions; only a
-successful Query replaces the active state. Pagination, Latest, and complete
-content use the current results' credentials and conditions. A request keeps the
-old results visible and replaces them together only on success. Failure or
+Edited inputs take effect when Query succeeds. Pagination and Latest reuse the
+current results' credentials and filters. The list keeps the old results visible
+while loading and replaces them together only on success. Failure or
 timeout preserves results and pagination, displays the reason, and restores
 controls. Each page performs one operation at a time and automatically stops
 waiting after 35 seconds; closing the page also abandons the wait. Browser
 cancellation does not guarantee that server work immediately
 stops; the server still applies its own query budget.
+
+Opening the complete content uses the current results' credentials to fetch the
+selected message by its `seq`. The detail page clears manually entered credentials
+on submission. If the request fails, the page shows the error and lets you enter
+credentials again.
 
 Messages display their top-level metadata and the payload encoding and original
 byte count. Complete list payloads start expanded and display their body immediately.
@@ -123,7 +138,7 @@ manually, reusing initialized content without parsing again. Detail pages show t
 complete payload as soon as the message is received, without requiring an initial
 expansion.
 When complete UTF-8 text can be parsed and formatted as JSON, the default view
-shows all formatted content in one text block, with a switch to the original text.
+shows all formatted content in one text block. A toggle appears only when the formatted text differs from the original.
 Parsing or formatting failures show the original text directly. JSON collapses
 and expands with the whole payload; long lines and indentation can be viewed by
 scrolling horizontally. The formatted view follows JavaScript parsing rules;
@@ -146,8 +161,10 @@ request `principal` must be positive; `channel_id`, detail `seq`, and
 `cursor.before_seq` allow zero. Bounded counts such as `limit` and payload byte
 sizes use JSON numbers. This rule does not change numbers inside opaque payloads.
 
-Every history and detail query first calls `GetStatus` with that request's
-`principal/token`. Invalid credentials return `401` even at a history boundary.
+Every history query first calls `GetStatus` with that request's `principal/token`.
+A detail query is authenticated by its single `Fetch` and does not make an extra
+`GetStatus` call for a boundary check. Invalid credentials return `401` even when
+the history cursor or detail target is beyond a history boundary.
 History starts at the fixed lower bound seq 0, and `GetStatus` returns only `max_seq`.
 `max_seq=0` means only the initialization message exists, not empty history.
 View can display seq 0 and messages in Channel 0;
@@ -163,7 +180,7 @@ Content-Type: application/json
   "principal": "10001",
   "token": "tok_xxx",
   "cursor": null,
-  "limit": 100,
+  "limit": 1,
   "channel_id": "10001",
   "only_my_recipient": false
 }
