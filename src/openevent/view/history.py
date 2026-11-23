@@ -9,11 +9,14 @@ from bisect import bisect_right
 from collections import OrderedDict, deque
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError, as_completed
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any
 
 import grpc
 
 from .config import HistoryConfig, OpenEventConfig, ServerConfig
+
+if TYPE_CHECKING:
+    from .upstream import HistoryClient
 
 
 UINT64_MAX = 2**64 - 1
@@ -43,24 +46,6 @@ class QueryDeadline:
         if remaining <= 0:
             raise QueryTimeout("query timed out")
         return remaining
-
-
-class OpenEventClientProtocol(Protocol):
-    def get_status(self, principal: int, token: str, *, timeout: float) -> Any: ...
-
-    def get_channel(self, principal: int, token: str, channel_id: int, *, timeout: float) -> Any: ...
-
-    def fetch(
-        self,
-        principal: int,
-        token: str,
-        from_seq: int,
-        limit: int,
-        only_my_recipient: bool = False,
-        channels: tuple[int, ...] = (),
-        *,
-        timeout: float,
-    ) -> Any: ...
 
 
 @dataclass(frozen=True)
@@ -96,7 +81,7 @@ class ChannelDisplay:
 class HistoryService:
     def __init__(
         self,
-        client: OpenEventClientProtocol,
+        client: HistoryClient,
         history_config: HistoryConfig,
         channel_cache_size: int = OpenEventConfig.channel_cache_size,
         channel_lookup_workers: int = OpenEventConfig.channel_lookup_workers,

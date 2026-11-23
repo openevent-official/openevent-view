@@ -19,6 +19,8 @@ installing View and querying message history.
 View requires Python 3.10 or newer and uses the SDK installed in its Python environment.
 The SDK submodule is a source reference only. See [pyproject.toml](pyproject.toml) for runtime dependencies.
 
+Run these commands from the View repository root. `make install` requires pip 22.3 or newer,
+compatible with the Python interpreter you select.
 If you use a virtual environment, activate it first. Use the same shell to set up the SDK,
 install View, and start it. This example uses an existing virtual environment at `/opt/openevent-view`.
 
@@ -29,7 +31,7 @@ source /opt/openevent-view/bin/activate
 Before running `make install`, install an `openevent-sdk` wheel (version 0.13.0 or newer)
 in the Python environment you will use for View, or configure pip to use a package source
 that provides a compatible version. To build the wheel, see the
-[SDK build instructions](https://github.com/openevent-official/openevent-sdk/blob/2183f679bc9e040db96aaab1eeda044bab91e856/README.md#build-and-test).
+[SDK build instructions](https://github.com/openevent-official/openevent-sdk/blob/fd4dd7062786129d3fa72e95e9dcf10163972ad0/README.md#build-and-test).
 
 ```bash
 make install
@@ -58,21 +60,43 @@ PYTHONPATH=src python3 -B -m openevent.view --config openevent-view.yaml
 
 ## Build Commands
 
-Run these commands from the View repository root. Use `PYTHON` to select a writable
-Python environment with pip installed. The default is `python3`. For example, run
-`make install PYTHON=/opt/openevent-view/bin/python`.
+Run Make from the View repository root. It defaults to the current shell's `python3`.
+You can use a system Python or a virtual environment. To select the interpreter that
+will run View, use `make install PYTHON=/opt/openevent-view/bin/python`.
 
 | Command | Purpose |
 | --- | --- |
-| `make build` | Build the wheel under `build/` and move it to `dist/` on success. |
-| `make install` | Install the wheel from this build, replacing View even at the same version. pip installs missing or incompatible dependencies and reuses those that meet the requirements. |
+| `make help` | List the available commands. |
+| `make build` | Build the wheel in isolation in a temporary directory under `build/`. On success, move it to `dist/` and print its path. |
+| `make install` | Install the wheel from this build into the selected Python environment, replacing View even at the same version. pip installs only missing or incompatible runtime dependencies. |
 | `make clean` | Remove View's temporary build files and release packages. Keep development environments, offline dependencies, and other projects' packages. |
 
-Installation stops before the build if install arguments, environment variables, or pip
-configuration specify `--python`, `--target`, `--prefix`, or `--root`.
+The install location must be writable. If the selected Python allows user installs
+and can import user-site packages, you can run `PIP_USER=1 make install` or set
+`user = true` in `pip.conf`. Installations into a distribution-managed system
+Python follow pip and distribution restrictions. If pip's environment variables or
+configuration specify `--python` or `--root`, `make install` stops before building.
 
-For an offline install, put the build and runtime dependencies, including their transitive
-dependencies, for the target environment in `build/wheelhouse/`, then run:
+### Installing into a Specific Directory
+
+To install View and its dependencies into an application's release directory, run
+`make build` first. Use a Python compatible with the deployment environment to run
+one of the following commands. Replace the example wheel path with the one printed
+by this build.
+
+- `python3 -B -m pip install --target ./packages dist/openevent_view-0.1.0-py3-none-any.whl` installs packages directly into `./packages/`.
+- `python3 -B -m pip install --prefix /opt/myapp dist/openevent_view-0.1.0-py3-none-any.whl` installs libraries and scripts under `/opt/myapp/lib/` and `/opt/myapp/bin/`.
+
+`PIP_TARGET`, `PIP_PREFIX`, and the `target` or `prefix` options in `pip.conf` are
+also for direct pip installs. Clear these settings before running `make install`.
+For direct installs, pip handles existing files and dependencies according to its own rules.
+
+### Offline Installation
+
+Both the build and install use pip's configured package sources. Use `[global]`
+in `pip.conf` for a shared source, or configure `[wheel]` and `[install]` separately.
+Put the build and runtime dependencies for the target environment, including their
+transitive dependencies, in `build/wheelhouse/`, then run the following command.
 
 ```bash
 PIP_NO_INDEX=1 PIP_FIND_LINKS=build/wheelhouse make install
