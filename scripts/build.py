@@ -1,5 +1,6 @@
 """Build the current View wheel and optionally install that exact file."""
 
+from configparser import RawConfigParser
 import os
 from pathlib import Path
 import shutil
@@ -7,23 +8,43 @@ import subprocess
 import sys
 from tempfile import TemporaryDirectory
 
-from pip._internal.commands import create_command
+from pip._internal.configuration import Configuration
 
 from install import check_install_environment, install_wheel
 
 
-def wheel_environment():
-    # pip wheel starts another pip install for its isolated build requirements.
-    # Both processes need the wheel's package sources, even with a separate
-    # [install] configuration for runtime dependencies.
-    parser = create_command("wheel").parser
-    parser.config.load()
+def wheel_environment(output):
     env = os.environ.copy()
-    for name, value in parser._get_ordered_configuration_items():
-        env["PIP_" + name.upper().replace("-", "_")] = value
-    env["PIP_CONFIG_FILE"] = os.devnull
-    for name in ("PIP_PYTHON", "PIP_ROOT", "PIP_TARGET", "PIP_PREFIX", "PIP_USER"):
-        env.pop(name, None)
+    redirects = {"python", "root", "target"}
+    sources = {"index-url", "extra-index-url", "no-index", "find-links"}
+    for name in redirects:
+        env.pop("PIP_" + name.upper(), None)
+
+    # pip installs build requirements with its own --no-user and --prefix.
+    # Keep the install subprocess's transport settings, including trusted-host,
+    # while using the wheel command's package sources for this build.
+    settings = Configuration(isolated=False)
+    settings.load()
+    config = RawConfigParser()
+    changed = False
+    for key, value in settings.items():
+        section, name = key.split(".", 1)
+        if section == ":env:":
+            continue
+        if not config.has_section(section):
+            config.add_section(section)
+        if value and (name in redirects or (section == "install" and name in sources)):
+            value = ""
+            changed = True
+        elif value and section == "wheel" and name in sources:
+            variable = "PIP_" + name.upper().replace("-", "_")
+            env[variable] = env.get(variable) or value
+        config.set(section, name, value)
+    if changed:
+        path = output / "pip.conf"
+        with path.open("w", encoding="utf-8") as stream:
+            config.write(stream)
+        env["PIP_CONFIG_FILE"] = str(path.resolve())
     return env
 
 
@@ -36,7 +57,7 @@ def main(mode):
         output = Path(directory)
         subprocess.run(
             [sys.executable, "-B", "-m", "pip", "wheel", "--no-deps", "--wheel-dir", output, "."],
-            env=wheel_environment(), check=True,
+            env=wheel_environment(output), check=True,
         )
         wheel, = output.glob("*.whl")
         release = Path("dist") / wheel.name
